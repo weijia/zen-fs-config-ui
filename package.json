@@ -1,0 +1,79 @@
+{
+  "name": "zen-fs-config-ui",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "UI control for configuring zen-fs-config sync groups (config-sync / data-sync). Provides both Web Component and React bindings.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "browser": "dist/zen-fs-config-ui.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js",
+      "require": "./dist/react/index.cjs"
+    },
+    "./web-component": {
+      "types": "./dist/web-component/index.d.ts",
+      "import": "./dist/web-component/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "DESIGN.md",
+    "REQUIREMENTS.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist"
+  },
+  "keywords": [
+    "zenfs",
+    "zen-fs",
+    "config",
+    "sync",
+    "ui",
+    "web-component",
+    "custom-element"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weijia/zen-fs-config-ui.git"
+  },
+  "peerDependencies": {
+    "react": ">=17.0.0",
+    "react-dom": ">=17.0.0",
+    "zen-fs-config": ">=0.5.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@zenfs/core": "^2.7.6",
+    "@zenfs/dom": "^1.2.14",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "rimraf": "^5.0.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.4.0",
+    "zen-fs-cache": "^1.0.5",
+    "zen-fs-config": "^0.5.24",
+    "zen-fs-sync": "^0.4.11"
+  }
+}
