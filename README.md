@@ -31,6 +31,31 @@ Drop the IIFE bundle in via a `<script>` tag:
 
 This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element.
 
+### Via esm.sh (CDN)
+
+When loading the **React** entry from esm.sh, you **must pin the React version** with the `?deps=` query parameter. Otherwise esm.sh resolves the `react@>=17.0.0` peer dependency to the latest major (e.g. React 19), which creates a *second* React instance if your app uses a different version — causing `Cannot read properties of null (reading 'useRef')` and a blank page.
+
+**React 18 app:**
+
+```tsx
+import { SyncGroupConfigurator } from 'https://esm.sh/zen-fs-config-ui@0.1.1/react?deps=react@18,react-dom@18';
+```
+
+**React 19 app:**
+
+```tsx
+import { SyncGroupConfigurator } from 'https://esm.sh/zen-fs-config-ui@0.1.1/react?deps=react@19,react-dom@19';
+```
+
+The **Web Component** entry has no React dependency, so no pinning is needed:
+
+```html
+<script type="module">
+  import 'https://esm.sh/zen-fs-config-ui@0.1.1/web-component';
+</script>
+<sync-group-configurator app-id="my-app"></sync-group-configurator>
+```
+
 ## Usage
 
 ### Web Component
