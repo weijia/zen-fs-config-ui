@@ -337,10 +337,17 @@ export class SyncGroupConfiguratorCore {
         } else if (this.mode === 'config-sync' && this.repo) {
           await addConfigBackend(this.repo, result.id, result.type, result.options, result.description);
           await this.loadConfigBackends();
+          // Save BackendInfo if this is the first remote backend.
+          if (this.configBackends.length === 1) {
+            this.saveBackendInfo({ type: result.type, options: result.options });
+          }
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'config-sync' });
         } else if (this.mode === 'data-sync' && this.dataGroup) {
           await addDataBackend(this.dataGroup, result.id, result.type, result.options, result.description);
           this.dataBackends = listDataBackends(this.dataGroup);
+          // Save BackendInfo so we can reconnect after refresh.
+          // The first remote backend added becomes the connection point.
+          this.saveBackendInfo({ type: result.type, options: result.options });
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'data-sync' });
         } else {
           // Initial mode: connect to the new backend.
