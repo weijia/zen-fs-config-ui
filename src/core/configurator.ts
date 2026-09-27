@@ -33,6 +33,13 @@ import { el, on, clear } from './render.js';
 import { STYLES } from './styles.js';
 import { openBackendForm } from './views/backend-form.js';
 
+/**
+ * Built-in local backend types that should never appear in the
+ * "Add Backend" selector. The local IndexedDB is always the primary
+ * backend (shown separately), and InMemory is a Node.js-only local.
+ */
+const LOCAL_BACKEND_TYPES = new Set(['IndexedDB', 'InMemory']);
+
 export class SyncGroupConfiguratorCore {
   private container: HTMLElement;
   private props: CoreProps;
@@ -64,7 +71,9 @@ export class SyncGroupConfiguratorCore {
   // ── Lifecycle ────────────────────────────────────────────────────────
 
   async mount(): Promise<void> {
-    this.metadata = getBackendMetadataList();
+    this.metadata = getBackendMetadataList().filter(
+      (m) => !LOCAL_BACKEND_TYPES.has(m.type),
+    );
     if (this.props.backendInfo) {
       await this.connect(this.props.backendInfo);
     } else {
