@@ -1,4 +1,7 @@
 import { defineConfig } from 'tsup';
+import pkg from './package.json';
+
+const VERSION = JSON.stringify(pkg.version);
 
 export default defineConfig([
   // ── npm build: CJS + ESM + d.ts ──────────────────────────────────────
@@ -13,6 +16,9 @@ export default defineConfig([
     clean: true,
     // Keep peer deps external
     external: ['react', 'react-dom', 'zen-fs-config'],
+    define: {
+      '__APP_VERSION__': VERSION,
+    },
   },
   // ── Browser IIFE build: bundles core + web-component (NO React) ──────
   // Exposes window.ZenFSConfigUI with the web component auto-registered.
@@ -28,6 +34,7 @@ export default defineConfig([
     outExtension: () => ({ js: '.js' }),
     define: {
       'process.env.NODE_ENV': '"production"',
+      '__APP_VERSION__': VERSION,
     },
   },
 ]);

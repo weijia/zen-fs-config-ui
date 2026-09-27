@@ -35,6 +35,9 @@ import { STYLES } from './styles.js';
 import { openBackendForm } from './views/backend-form.js';
 import { serializeBackend } from './config-string.js';
 
+/** UI version — injected by tsup from package.json at build time. */
+declare const __APP_VERSION__: string;
+
 /**
  * Built-in local backend types that should never appear in the
  * "Add Backend" selector. The local IndexedDB is always the primary
@@ -51,6 +54,9 @@ export class SyncGroupConfiguratorCore {
 
   private mode: GroupMode = 'initial';
   private connecting = false;
+  /** When true, a background connection is running but we keep showing
+   *  the cached backends instead of the "connecting" spinner. */
+  private backgroundConnecting = false;
   private error: string | null = null;
 
   private repo: IConfigRepo | null = null;
@@ -73,6 +79,18 @@ export class SyncGroupConfiguratorCore {
     this.container.classList.add('zfui-root');
     this.props = { ...props };
     this.injectStyles();
+    this.logVersion();
+  }
+
+  // ── Version logging ──────────────────────────────────────────────────
+
+  private logVersion(): void {
+    const uiVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
+    console.log(
+      `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
+      'color:#2563eb;font-weight:bold',
+      'color:inherit',
+    );
   }
 
   // ── localStorage persistence ────────────────────────────────────────
@@ -117,11 +135,13 @@ export class SyncGroupConfiguratorCore {
       // Check localStorage for previously saved state.
       const saved = this.loadState();
       if (saved) {
-        // Restore backends instantly from cache, then connect in background.
+        // Restore backends instantly from cache, then connect in background
+        // WITHOUT showing the "connecting" spinner (we have cached data).
         this.mode = 'data-sync';
         this.dataBackends = saved.backends;
+        this.backgroundConnecting = true;
         this.render();
-        void this.connect(saved.primaryBackend);
+        void this.connect(saved.primaryBackend, true);
       } else {
         await this.connect(undefined);
       }
@@ -130,7 +150,6 @@ export class SyncGroupConfiguratorCore {
 
   update(props: Partial<CoreProps>): void {
     this.props = { ...this.props, ...props };
-    // If backendInfo changed and we're in initial mode, reconnect
     if (props.backendInfo && this.mode === 'initial') {
       void this.connect(props.backendInfo);
     }
@@ -160,8 +179,17 @@ export class SyncGroupConfiguratorCore {
 
   // ── Connection ───────────────────────────────────────────────────────
 
-  private async connect(backendInfo?: BackendInfo): Promise<void> {
-    this.connecting = true;
+  /**
+   * Connect to a sync group.
+   * @param isBackground When true, we keep showing cached backends instead
+   *   of the "connecting" spinner, and don't clear state on failure.
+   */
+  private async connect(backendInfo?: BackendInfo, isBackground = false): Promise<void> {
+    if (isBackground) {
+      this.backgroundConnecting = true;
+    } else {
+      this.connecting = true;
+    }
     this.error = null;
     this.render();
 
@@ -173,7 +201,6 @@ export class SyncGroupConfiguratorCore {
         this.mode = 'config-sync';
         await this.loadConfigBackends();
         await this.loadDataGroups();
-        // Persist full state for refresh recovery.
         if (backendInfo) {
           this.saveState({ primaryBackend: backendInfo, backends: this.configBackends });
         }
@@ -192,12 +219,15 @@ export class SyncGroupConfiguratorCore {
       });
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
-      // If the saved backend is no longer reachable, clear state so we don't
-      // keep retrying a dead connection on every refresh.
-      if (backendInfo) this.clearState();
+      if (backendInfo && !isBackground) {
+        // Only clear state on a foreground failure — background failures
+        // keep the cached data so the user can still see their config.
+        this.clearState();
+      }
       this.emit('error', { message: this.error });
     } finally {
       this.connecting = false;
+      this.backgroundConnecting = false;
       this.render();
     }
   }
@@ -257,6 +287,11 @@ export class SyncGroupConfiguratorCore {
         } else if (this.mode === 'data-sync' && this.dataGroup) {
           await addDataBackend(this.dataGroup, result.id, result.type, result.options, result.description);
           this.dataBackends = listDataBackends(this.dataGroup);
+          // Update saved state with the new backend list.
+          const saved = this.loadState();
+          if (saved) {
+            this.saveState({ primaryBackend: saved.primaryBackend, backends: this.dataBackends });
+          }
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'data-sync' });
         } else {
           // Initial mode: show the backend immediately, then connect in
@@ -270,10 +305,9 @@ export class SyncGroupConfiguratorCore {
           this.mode = 'data-sync';
           this.showForm = false;
           this.render();
-          // Persist + connect without blocking the UI
           const info: BackendInfo = { type: result.type, options: result.options };
           this.saveState({ primaryBackend: info, backends: this.dataBackends });
-          void this.connect(info);
+          void this.connect(info, true);
           return;
         }
         this.showForm = false;
@@ -295,12 +329,17 @@ export class SyncGroupConfiguratorCore {
       } else if (this.mode === 'data-sync' && this.dataGroup) {
         await removeDataBackend(this.dataGroup, id);
         this.dataBackends = listDataBackends(this.dataGroup);
-        // If only the local backend remains, clear saved state and reset.
         if (this.dataBackends.length <= 1) {
           this.clearState();
           this.mode = 'initial';
           this.dataGroup = null;
           this.dataBackends = [];
+        } else {
+          // Update saved state.
+          const saved = this.loadState();
+          if (saved) {
+            this.saveState({ primaryBackend: saved.primaryBackend, backends: this.dataBackends });
+          }
         }
       }
       this.emit('backend-removed', { backendId: id });
@@ -330,7 +369,6 @@ export class SyncGroupConfiguratorCore {
     if (root instanceof Document) {
       root.head.appendChild(this.styleEl);
     } else {
-      // ShadowRoot: prepend styles so they apply to the host content.
       (root as ShadowRoot).prepend(this.styleEl);
     }
   }
@@ -339,6 +377,8 @@ export class SyncGroupConfiguratorCore {
     if (this.destroyed) return;
     clear(this.container);
 
+    // Only show the full-screen "connecting" spinner when we have NO
+    // cached data to show. Background connections keep the UI visible.
     if (this.connecting) {
       this.container.appendChild(el('div', { className: 'zfui-loading' }, '正在连接后端...'));
       return;
@@ -353,10 +393,18 @@ export class SyncGroupConfiguratorCore {
     const header = el('div', { className: 'zfui-header' });
     const titleText = this.mode === 'config-sync' ? '配置同步组'
       : this.mode === 'data-sync' ? '数据同步组' : '同步组';
-    header.appendChild(el('div', {}, [
+    const headerLeft = el('div', {}, [
       el('h1', { className: 'zfui-title' }, titleText),
       el('div', { className: 'zfui-subtitle' }, this.getSubtitle()),
-    ]));
+    ]);
+    header.appendChild(headerLeft);
+    // Show a small "syncing..." indicator during background connection.
+    if (this.backgroundConnecting) {
+      header.appendChild(el('span', {
+        className: 'zfui-sync-indicator',
+        style: 'font-size:11px;color:#6b7280;flex-shrink:0',
+      }, '⟳ 同步中...'));
+    }
     this.container.appendChild(header);
 
     if (this.error) {
@@ -385,7 +433,7 @@ export class SyncGroupConfiguratorCore {
     if (this.mode === 'config-sync' && this.configBackends.length === 0) {
       return '当前仅本地存储 (IndexedDB)，未连接远程后端';
     }
-    if (this.mode === 'data-sync' && this.dataBackends.length <= 1) {
+    if (this.mode === 'data-sync' && this.dataBackends.length === 0) {
       return '本地存储模式，可添加远程后端进行数据同步';
     }
     return '';
@@ -464,6 +512,8 @@ export class SyncGroupConfiguratorCore {
     }
     section.appendChild(list);
 
+    // Always show "Add backend" button — data-sync groups can have
+    // multiple remote backends for redundancy.
     const addBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 添加后端');
     on(addBtn, 'click', () => { void this.handleAddBackend(); });
     section.appendChild(addBtn);
@@ -517,7 +567,7 @@ export class SyncGroupConfiguratorCore {
 
     const actions = el('div', { className: 'zfui-backend-item-actions' });
 
-    // Copy config string button (no prompt fallback — shows inline hint)
+    // Copy config string button
     const copyBtn = el('button', {
       className: 'zfui-btn zfui-btn-sm zfui-btn-secondary',
       title: '复制配置字符串',
@@ -530,7 +580,6 @@ export class SyncGroupConfiguratorCore {
         copyBtn.textContent = '✓';
         setTimeout(() => { copyBtn.textContent = '📋'; }, 1500);
       } catch {
-        // Fallback: show the string inline (no prompt)
         if (!hintEl) {
           hintEl = el('div', { className: 'zfui-copy-hint' }, str);
           li.appendChild(hintEl);
