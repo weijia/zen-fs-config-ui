@@ -76,28 +76,32 @@ export class SyncGroupConfiguratorCore {
   }
 
   // ── localStorage persistence ────────────────────────────────────────
+  // zen-fs-config's data-sync mode uses InMemory for the local FS, so all
+  // backend config is lost on page refresh. We persist the full backend
+  // list (and the primary BackendInfo for reconnection) to localStorage
+  // so the UI can restore instantly without waiting for the remote.
 
   private get storageKey(): string {
     return `${STORAGE_KEY_PREFIX}${this.props.appId}`;
   }
 
-  private saveBackendInfo(info: BackendInfo): void {
+  private saveState(state: { primaryBackend: BackendInfo; backends: BackendDescriptor[] }): void {
     try {
-      localStorage.setItem(this.storageKey, JSON.stringify(info));
-    } catch { /* localStorage may be unavailable (private mode, sandbox) */ }
+      localStorage.setItem(this.storageKey, JSON.stringify(state));
+    } catch { /* localStorage may be unavailable */ }
   }
 
-  private loadBackendInfo(): BackendInfo | null {
+  private loadState(): { primaryBackend: BackendInfo; backends: BackendDescriptor[] } | null {
     try {
       const raw = localStorage.getItem(this.storageKey);
       if (!raw) return null;
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.type === 'string' && parsed.options) return parsed;
+      if (parsed?.primaryBackend?.type && parsed?.backends instanceof Array) return parsed;
     } catch { /* ignore */ }
     return null;
   }
 
-  private clearBackendInfo(): void {
+  private clearState(): void {
     try { localStorage.removeItem(this.storageKey); } catch { /* ignore */ }
   }
 
@@ -107,15 +111,20 @@ export class SyncGroupConfiguratorCore {
     this.metadata = getBackendMetadataList().filter(
       (m) => !LOCAL_BACKEND_TYPES.has(m.type),
     );
-    // Try to restore a previously connected backend from localStorage.
-    const saved = this.loadBackendInfo();
     if (this.props.backendInfo) {
       await this.connect(this.props.backendInfo);
-    } else if (saved) {
-      await this.connect(saved);
     } else {
-      // No remote backend — start in local-only mode
-      await this.connect(undefined);
+      // Check localStorage for previously saved state.
+      const saved = this.loadState();
+      if (saved) {
+        // Restore backends instantly from cache, then connect in background.
+        this.mode = 'data-sync';
+        this.dataBackends = saved.backends;
+        this.render();
+        void this.connect(saved.primaryBackend);
+      } else {
+        await this.connect(undefined);
+      }
     }
   }
 
@@ -162,15 +171,19 @@ export class SyncGroupConfiguratorCore {
       if (result.repo) {
         this.repo = result.repo;
         this.mode = 'config-sync';
-        // Persist the remote backend so we can reconnect on refresh.
-        if (backendInfo) this.saveBackendInfo(backendInfo);
         await this.loadConfigBackends();
         await this.loadDataGroups();
+        // Persist full state for refresh recovery.
+        if (backendInfo) {
+          this.saveState({ primaryBackend: backendInfo, backends: this.configBackends });
+        }
       } else if (result.dataGroup) {
         this.dataGroup = result.dataGroup;
         this.mode = 'data-sync';
-        if (backendInfo) this.saveBackendInfo(backendInfo);
         this.dataBackends = listDataBackends(result.dataGroup);
+        if (backendInfo) {
+          this.saveState({ primaryBackend: backendInfo, backends: this.dataBackends });
+        }
       }
 
       this.emit('connected', {
@@ -179,9 +192,9 @@ export class SyncGroupConfiguratorCore {
       });
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
-      // If the saved backend is no longer reachable, clear it so we don't
+      // If the saved backend is no longer reachable, clear state so we don't
       // keep retrying a dead connection on every refresh.
-      if (backendInfo) this.clearBackendInfo();
+      if (backendInfo) this.clearState();
       this.emit('error', { message: this.error });
     } finally {
       this.connecting = false;
@@ -259,7 +272,7 @@ export class SyncGroupConfiguratorCore {
           this.render();
           // Persist + connect without blocking the UI
           const info: BackendInfo = { type: result.type, options: result.options };
-          this.saveBackendInfo(info);
+          this.saveState({ primaryBackend: info, backends: this.dataBackends });
           void this.connect(info);
           return;
         }
@@ -278,13 +291,13 @@ export class SyncGroupConfiguratorCore {
       if (this.mode === 'config-sync' && this.repo) {
         await removeConfigBackend(this.repo, id);
         await this.loadConfigBackends();
-        if (this.configBackends.length === 0) this.clearBackendInfo();
+        if (this.configBackends.length === 0) this.clearState();
       } else if (this.mode === 'data-sync' && this.dataGroup) {
         await removeDataBackend(this.dataGroup, id);
         this.dataBackends = listDataBackends(this.dataGroup);
-        // If only the local backend remains, clear saved info and reset.
+        // If only the local backend remains, clear saved state and reset.
         if (this.dataBackends.length <= 1) {
-          this.clearBackendInfo();
+          this.clearState();
           this.mode = 'initial';
           this.dataGroup = null;
           this.dataBackends = [];
