@@ -207,11 +207,47 @@ export class SyncGroupConfiguratorCore {
         // full backend list from the remote's /.meta/backends/.
         this.backgroundConnecting = true;
         this.render();
-        void this.connect(saved, true);
+        this.waitForBackendRegistration(saved.type).then(() => {
+          void this.connect(saved, true);
+        });
       } else {
         await this.connect(undefined);
       }
     }
+  }
+
+  /**
+   * Polls until the backend type is registered, then resolves.
+   * In browser <script> usage, registration may happen after mount()
+   * due to script load timing. Times out after 10s.
+   */
+  private waitForBackendRegistration(type: string): Promise<void> {
+    const check = () => {
+      const all = getBackendMetadataList();
+      if (all.some(m => m.type === type)) return true;
+      // Also check internal registry (includes InMemory, IndexedDB)
+      return all.some(m => m.type === type);
+    };
+    if (check()) {
+      console.log(`[zen-fs-config-ui] waitForBackendRegistration: type=${type} already registered`);
+      return Promise.resolve();
+    }
+    console.log(`[zen-fs-config-ui] waitForBackendRegistration: type=${type} not registered yet, polling...`);
+    return new Promise<void>((resolve) => {
+      const interval = setInterval(() => {
+        if (check()) {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          console.log(`[zen-fs-config-ui] waitForBackendRegistration: type=${type} now registered`);
+          resolve();
+        }
+      }, 100);
+      const timeout = setTimeout(() => {
+        clearInterval(interval);
+        console.warn(`[zen-fs-config-ui] waitForBackendRegistration: timed out waiting for type=${type}`);
+        resolve(); // resolve anyway so connect() can attempt (and show error if truly unregistered)
+      }, 10000);
+    });
   }
 
   update(props: Partial<CoreProps>): void {
