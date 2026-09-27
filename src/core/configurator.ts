@@ -63,7 +63,7 @@ export class SyncGroupConfiguratorCore {
   private styleEl: HTMLStyleElement | null = null;
   private showForm = false;
   private formContainer: HTMLElement | null = null;
-  private formKind: 'backend' | 'data-group' = 'backend;
+  private formKind: 'backend' | 'data-group' = 'backend';
 
   private listeners: Map<CoreEventName, Set<CoreEventListener>> = new Map();
 
