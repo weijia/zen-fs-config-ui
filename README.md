@@ -29,9 +29,9 @@ Drop the IIFE bundle in via a `<script>` tag — no bundler, no NPM install:
 <script src="https://unpkg.com/zen-fs-config-ui"></script>
 ```
 
-This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element. The global `window.ZenFSConfigUI` is exposed with `registerBackend()` and `listBackendMetadata()` so you can register backend types from other CDN modules.
+This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element. The global `window.ZenFSConfigUI` exposes `registerBackend()`, `wrapZenFSFileSystem()`, and `listBackendMetadata()` so you can register backend types from other CDN `<script>` tags.
 
-#### Complete browser example
+#### Complete browser example (Gitee + RemoteStorage, script tags only)
 
 ```html
 <!DOCTYPE html>
@@ -41,37 +41,78 @@ This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` 
   <title>Sync Group Configurator</title>
 </head>
 <body>
-  <!-- 1. Load the UI bundle (auto-registers <sync-group-configurator>) -->
+  <!-- 1. UI bundle — auto-registers <sync-group-configurator> and exposes ZenFSConfigUI -->
   <script src="https://unpkg.com/zen-fs-config-ui"></script>
 
-  <!-- 2. Register backend types before the element renders -->
-  <script type="module">
-    // Import a backend implementation from esm.sh (or any CDN)
-    const { factory, metadata } = await import('https://esm.sh/zen-fs-config-gitee');
-    ZenFSConfigUI.registerBackend('Gitee', factory, metadata);
+  <!-- 2. Backend implementations (load their global builds) -->
+  <script src="https://unpkg.com/zen-fs-gitee/dist/zen-fs-gitee.global.js"></script>
+  <script src="https://unpkg.com/zen-fs-remotestoragejs/dist/zen-fs-remotestoragejs.global.js"></script>
 
-    // Register more backends as needed…
-    // const gh = await import('https://esm.sh/zen-fs-config-github');
-    // ZenFSConfigUI.registerBackend('GitHub', gh.factory, gh.metadata);
+  <!-- 3. Register both backends BEFORE the element is added to the DOM -->
+  <script>
+    // --- Gitee backend ---
+    // ZenFSGitee.Gitee is a ZenFS Backend. Wrap it with wrapZenFSFileSystem.
+    ZenFSConfigUI.registerBackend('Gitee', async (options) => {
+      return ZenFSConfigUI.wrapZenFSFileSystem({ backend: ZenFSGitee.Gitee, ...options });
+    }, {
+      type: 'Gitee',
+      label: 'Gitee',
+      icon: '🐙',
+      fields: [
+        { key: 'token', label: 'Token', type: 'password', required: true,
+          placeholder: 'gitee_pat_xxx' },
+        { key: 'owner', label: 'Owner', type: 'text', required: true,
+          placeholder: 'username or org' },
+        { key: 'repo', label: 'Repo', type: 'text', required: true,
+          placeholder: 'repo-name' },
+        { key: 'branch', label: 'Branch', type: 'text', placeholder: 'master' },
+      ],
+      defaultOptions: { branch: 'master' },
+      accountFields: ['token', 'owner'],
+    });
+
+    // --- RemoteStorage backend ---
+    // createRemoteStorageFileSystem() returns a ZenFS FileSystem; pass it directly.
+    ZenFSConfigUI.registerBackend('RemoteStorage', async (options) => {
+      const fs = ZenFSRemoteStorage.createRemoteStorageFileSystem({
+        href: options.href,
+        token: options.token,
+        basePath: options.basePath,
+      });
+      return ZenFSConfigUI.wrapZenFSFileSystem(fs);
+    }, {
+      type: 'RemoteStorage',
+      label: 'RemoteStorage',
+      icon: '☁️',
+      fields: [
+        { key: 'href', label: 'Server URL', type: 'text', required: true,
+          placeholder: 'https://storage.5apps.com/' },
+        { key: 'token', label: 'Bearer Token', type: 'password', required: true,
+          placeholder: 'your-rs-token' },
+        { key: 'basePath', label: 'Base Path', type: 'text', placeholder: '/public/' },
+      ],
+      defaultOptions: { basePath: '/public/' },
+      accountFields: ['token', 'href'],
+    });
   </script>
 
-  <!-- 3. Use the Web Component -->
+  <!-- 4. Use the Web Component -->
   <sync-group-configurator
     app-id="my-app"
-    style="display:block;max-width:600px;margin:40px auto;"
+    style="display:block;max-width:640px;margin:40px auto;"
   ></sync-group-configurator>
 
-  <!-- 4. (Optional) Pre-configure a remote backend via attributes -->
+  <!-- 5. (Optional) Pre-configure a remote backend via attributes -->
   <!--
   <sync-group-configurator
     app-id="my-app"
     backend-type="Gitee"
-    backend-options='{"token":"xxx","owner":"weijia","repo":"configs"}'
+    backend-options='{"token":"gitee_pat_xxx","owner":"weijia","repo":"configs"}'
   ></sync-group-configurator>
   -->
 
   <script>
-    // 5. Listen for events
+    // 6. Listen for events
     const el = document.querySelector('sync-group-configurator');
     el.addEventListener('connected', (e) => {
       console.log('connected, group type:', e.detail.groupType);
@@ -86,12 +127,24 @@ This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` 
 
 #### How backend registration works in the browser
 
-The IIFE bundle includes `zen-fs-config` internally but does **not** include any backend implementations (Gitee, GitHub, WebDAV, etc.). Those are separate packages you load from a CDN and register via the global:
+The IIFE bundle includes `zen-fs-config` internally but does **not** include any backend implementations (Gitee, RemoteStorage, GitHub, etc.). Those are separate packages you load from a CDN and register via the global:
 
 ```js
 // Available on window.ZenFSConfigUI after the <script> loads:
 ZenFSConfigUI.registerBackend(type, factory, metadata);
-ZenFSConfigUI.listBackendMetadata();  // → array of registered types
+ZenFSConfigUI.wrapZenFSFileSystem(config);   // wrap a ZenFS Backend or FileSystem
+ZenFSConfigUI.listBackendMetadata();           // → array of registered types
+```
+
+The `factory` receives the form options and must return a `BackendInstance`. Use `wrapZenFSFileSystem` to adapt a ZenFS `Backend` (e.g. `Gitee`) or a ZenFS `FileSystem` (e.g. from `createRemoteStorageFileSystem`):
+
+```js
+// ZenFS Backend:
+wrapZenFSFileSystem({ backend: ZenFSGitee.Gitee, token, owner, repo });
+
+// ZenFS FileSystem instance:
+const fs = ZenFSRemoteStorage.createRemoteStorageFileSystem({ href, token });
+wrapZenFSFileSystem(fs);
 ```
 
 The `<sync-group-configurator>` reads the registered metadata to render the backend type selector and dynamic form fields. If no backends are registered, the "添加后端" form will have an empty type list.
