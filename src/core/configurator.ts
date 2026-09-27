@@ -38,14 +38,9 @@ import { serializeBackend } from './config-string.js';
 /** UI version — injected by tsup from package.json at build time. */
 declare const __APP_VERSION__: string;
 
-/**
- * Built-in local backend types that should never appear in the
- * "Add Backend" selector. The local IndexedDB is always the primary
- * backend (shown separately), and InMemory is a Node.js-only local.
- */
 const LOCAL_BACKEND_TYPES = new Set(['IndexedDB', 'InMemory']);
 
-const STORAGE_KEY_PREFIX = 'zenfs-config-ui:';
+const STORAGE_KEY = 'zenfs-config-ui:backend';
 
 export class SyncGroupConfiguratorCore {
   private container: HTMLElement;
@@ -54,8 +49,6 @@ export class SyncGroupConfiguratorCore {
 
   private mode: GroupMode = 'initial';
   private connecting = false;
-  /** When true, a background connection is running but we keep showing
-   *  the cached backends instead of the "connecting" spinner. */
   private backgroundConnecting = false;
   private error: string | null = null;
 
@@ -70,7 +63,7 @@ export class SyncGroupConfiguratorCore {
   private styleEl: HTMLStyleElement | null = null;
   private showForm = false;
   private formContainer: HTMLElement | null = null;
-  private formKind: 'backend' | 'data-group' = 'backend';
+  private formKind: 'backend' | 'data-group' = 'backend;
 
   private listeners: Map<CoreEventName, Set<CoreEventListener>> = new Map();
 
@@ -93,44 +86,68 @@ export class SyncGroupConfiguratorCore {
     );
   }
 
-  // ── localStorage persistence ────────────────────────────────────────
-  // zen-fs-config's data-sync mode uses InMemory for the local FS, so all
-  // backend config is lost on page refresh. We persist the full backend
-  // list (and the primary BackendInfo for reconnection) to localStorage
-  // so the UI can restore instantly without waiting for the remote.
+  // ── BackendInfo persistence ─────────────────────────────────────────
+  // zen-fs-config saves backend descriptors on the remote itself
+  // (/.meta/backends/*.json). The UI only needs to persist the
+  // *connection info* (BackendInfo: type + options) so it knows which
+  // remote to reconnect to after a page refresh.
+  //
+  // In sandbox iframes (about:srcdoc), localStorage is ephemeral — each
+  // iframe recreation starts fresh. We try multiple storage layers:
+  // localStorage → sessionStorage → cookie. If all fail, the user must
+  // pass backend-type/backend-options as HTML attributes.
 
-  private get storageKey(): string {
-    return `${STORAGE_KEY_PREFIX}${this.props.appId}`;
+  private saveBackendInfo(info: BackendInfo): void {
+    const str = JSON.stringify(info);
+    // Layer 1: localStorage (works in production)
+    try { localStorage.setItem(STORAGE_KEY, str); return; } catch { /* fall through */ }
+    // Layer 2: sessionStorage (might survive in some sandboxes)
+    try { sessionStorage.setItem(STORAGE_KEY, str); return; } catch { /* fall through */ }
+    // Layer 3: cookie (limited size but might persist)
+    try {
+      document.cookie = `${STORAGE_KEY}=${encodeURIComponent(str)};path=/;max-age=31536000`;
+      console.log('[zen-fs-config-ui] saved BackendInfo to cookie (localStorage unavailable)');
+      return;
+    } catch { /* give up */ }
+    console.warn('[zen-fs-config-ui] no storage available — BackendInfo not persisted');
   }
 
-  private saveState(state: { primaryBackend: BackendInfo; backends: BackendDescriptor[] }): void {
+  private loadBackendInfo(): BackendInfo | null {
+    // Layer 1: localStorage
     try {
-      localStorage.setItem(this.storageKey, JSON.stringify(state));
-      console.log(`[zen-fs-config-ui] saved state to localStorage (key=${this.storageKey}, ${state.backends.length} backends)`);
-    } catch (e) {
-      console.warn(`[zen-fs-config-ui] failed to save state:`, e);
-    }
-  }
-
-  private loadState(): { primaryBackend: BackendInfo; backends: BackendDescriptor[] } | null {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return this.parseBackendInfo(raw);
+    } catch { /* fall through */ }
+    // Layer 2: sessionStorage
     try {
-      const raw = localStorage.getItem(this.storageKey);
-      console.log(`[zen-fs-config-ui] loadState: key=${this.storageKey}, raw=${raw ? `${raw.length} chars` : 'null'}`);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (parsed?.primaryBackend?.type && parsed?.backends instanceof Array) {
-        console.log(`[zen-fs-config-ui] loadState: restored ${parsed.backends.length} backends, primaryBackend.type=${parsed.primaryBackend.type}`);
-        return parsed;
-      }
-      console.warn(`[zen-fs-config-ui] loadState: parsed data invalid`, parsed);
-    } catch (e) {
-      console.warn(`[zen-fs-config-ui] loadState: error`, e);
-    }
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+      if (raw) return this.parseBackendInfo(raw);
+    } catch { /* fall through */ }
+    // Layer 3: cookie
+    try {
+      const match = document.cookie.match(/zenfs-config-ui:backend=([^;]+)/);
+      if (match) return this.parseBackendInfo(decodeURIComponent(match[1]));
+    } catch { /* fall through */ }
     return null;
   }
 
-  private clearState(): void {
-    try { localStorage.removeItem(this.storageKey); } catch { /* ignore */ }
+  private parseBackendInfo(raw: string): BackendInfo | null {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.type && parsed?.options) {
+        console.log(`[zen-fs-config-ui] restored BackendInfo: type=${parsed.type}`);
+        return parsed;
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  private clearBackendInfo(): void {
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    try {
+      document.cookie = `${STORAGE_KEY}=;path=/;max-age=0`;
+    } catch { /* ignore */ }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────
@@ -142,16 +159,13 @@ export class SyncGroupConfiguratorCore {
     if (this.props.backendInfo) {
       await this.connect(this.props.backendInfo);
     } else {
-      // Check localStorage for previously saved state.
-      const saved = this.loadState();
+      const saved = this.loadBackendInfo();
       if (saved) {
-        // Restore backends instantly from cache, then connect in background
-        // WITHOUT showing the "connecting" spinner (we have cached data).
-        this.mode = 'data-sync';
-        this.dataBackends = saved.backends;
+        // Restore: connect in background, zen-fs-config will read the
+        // full backend list from the remote's /.meta/backends/.
         this.backgroundConnecting = true;
         this.render();
-        void this.connect(saved.primaryBackend, true);
+        void this.connect(saved, true);
       } else {
         await this.connect(undefined);
       }
@@ -189,11 +203,6 @@ export class SyncGroupConfiguratorCore {
 
   // ── Connection ───────────────────────────────────────────────────────
 
-  /**
-   * Connect to a sync group.
-   * @param isBackground When true, we keep showing cached backends instead
-   *   of the "connecting" spinner, and don't clear state on failure.
-   */
   private async connect(backendInfo?: BackendInfo, isBackground = false): Promise<void> {
     if (isBackground) {
       this.backgroundConnecting = true;
@@ -211,16 +220,13 @@ export class SyncGroupConfiguratorCore {
         this.mode = 'config-sync';
         await this.loadConfigBackends();
         await this.loadDataGroups();
-        if (backendInfo) {
-          this.saveState({ primaryBackend: backendInfo, backends: this.configBackends });
-        }
+        if (backendInfo) this.saveBackendInfo(backendInfo);
       } else if (result.dataGroup) {
         this.dataGroup = result.dataGroup;
         this.mode = 'data-sync';
+        // zen-fs-config reads the backend list from the remote.
         this.dataBackends = listDataBackends(result.dataGroup);
-        if (backendInfo) {
-          this.saveState({ primaryBackend: backendInfo, backends: this.dataBackends });
-        }
+        if (backendInfo) this.saveBackendInfo(backendInfo);
       }
 
       this.emit('connected', {
@@ -229,11 +235,7 @@ export class SyncGroupConfiguratorCore {
       });
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
-      if (backendInfo && !isBackground) {
-        // Only clear state on a foreground failure — background failures
-        // keep the cached data so the user can still see their config.
-        this.clearState();
-      }
+      if (backendInfo && !isBackground) this.clearBackendInfo();
       this.emit('error', { message: this.error });
     } finally {
       this.connecting = false;
@@ -297,26 +299,16 @@ export class SyncGroupConfiguratorCore {
         } else if (this.mode === 'data-sync' && this.dataGroup) {
           await addDataBackend(this.dataGroup, result.id, result.type, result.options, result.description);
           this.dataBackends = listDataBackends(this.dataGroup);
-          // Update saved state with the new backend list.
-          const saved = this.loadState();
-          if (saved) {
-            this.saveState({ primaryBackend: saved.primaryBackend, backends: this.dataBackends });
-          }
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'data-sync' });
         } else {
-          // Initial mode: show the backend immediately, then connect in
-          // the background so the user doesn't stare at a blank screen.
-          this.dataBackends = [{
-            id: result.id,
-            type: result.type,
-            options: result.options,
-            description: result.description,
-          }];
+          // Initial mode: connect to the new backend.
+          // zen-fs-config will save the backend list on the remote.
+          const info: BackendInfo = { type: result.type, options: result.options };
+          this.saveBackendInfo(info);
           this.mode = 'data-sync';
           this.showForm = false;
+          this.dataBackends = [{ id: result.id, type: result.type, options: result.options, description: result.description }];
           this.render();
-          const info: BackendInfo = { type: result.type, options: result.options };
-          this.saveState({ primaryBackend: info, backends: this.dataBackends });
           void this.connect(info, true);
           return;
         }
@@ -335,21 +327,15 @@ export class SyncGroupConfiguratorCore {
       if (this.mode === 'config-sync' && this.repo) {
         await removeConfigBackend(this.repo, id);
         await this.loadConfigBackends();
-        if (this.configBackends.length === 0) this.clearState();
+        if (this.configBackends.length === 0) this.clearBackendInfo();
       } else if (this.mode === 'data-sync' && this.dataGroup) {
         await removeDataBackend(this.dataGroup, id);
         this.dataBackends = listDataBackends(this.dataGroup);
         if (this.dataBackends.length <= 1) {
-          this.clearState();
+          this.clearBackendInfo();
           this.mode = 'initial';
           this.dataGroup = null;
           this.dataBackends = [];
-        } else {
-          // Update saved state.
-          const saved = this.loadState();
-          if (saved) {
-            this.saveState({ primaryBackend: saved.primaryBackend, backends: this.dataBackends });
-          }
         }
       }
       this.emit('backend-removed', { backendId: id });
@@ -387,8 +373,6 @@ export class SyncGroupConfiguratorCore {
     if (this.destroyed) return;
     clear(this.container);
 
-    // Only show the full-screen "connecting" spinner when we have NO
-    // cached data to show. Background connections keep the UI visible.
     if (this.connecting) {
       this.container.appendChild(el('div', { className: 'zfui-loading' }, '正在连接后端...'));
       return;
@@ -403,15 +387,12 @@ export class SyncGroupConfiguratorCore {
     const header = el('div', { className: 'zfui-header' });
     const titleText = this.mode === 'config-sync' ? '配置同步组'
       : this.mode === 'data-sync' ? '数据同步组' : '同步组';
-    const headerLeft = el('div', {}, [
+    header.appendChild(el('div', {}, [
       el('h1', { className: 'zfui-title' }, titleText),
       el('div', { className: 'zfui-subtitle' }, this.getSubtitle()),
-    ]);
-    header.appendChild(headerLeft);
-    // Show a small "syncing..." indicator during background connection.
+    ]));
     if (this.backgroundConnecting) {
       header.appendChild(el('span', {
-        className: 'zfui-sync-indicator',
         style: 'font-size:11px;color:#6b7280;flex-shrink:0',
       }, '⟳ 同步中...'));
     }
@@ -429,7 +410,7 @@ export class SyncGroupConfiguratorCore {
       this.container.appendChild(this.buildInitialView());
     }
 
-    // Inline form (rendered below the section, no popup)
+    // Inline form
     if (this.showForm) {
       this.formContainer = el('div', { className: 'zfui-form-slot' });
       this.container.appendChild(this.formContainer);
@@ -469,7 +450,6 @@ export class SyncGroupConfiguratorCore {
   private buildConfigSyncView(): HTMLElement {
     const frag = document.createDocumentFragment();
 
-    // Sync backends section
     const syncSection = el('div', { className: 'zfui-section' });
     syncSection.appendChild(el('div', { className: 'zfui-section-title' }, '🔧 同步后端'));
 
@@ -485,7 +465,6 @@ export class SyncGroupConfiguratorCore {
     syncSection.appendChild(addBtn);
     frag.appendChild(syncSection);
 
-    // Data sync groups section
     const dgSection = el('div', { className: 'zfui-section' });
     dgSection.appendChild(el('div', { className: 'zfui-section-title' }, '📦 数据同步组'));
 
@@ -522,8 +501,6 @@ export class SyncGroupConfiguratorCore {
     }
     section.appendChild(list);
 
-    // Always show "Add backend" button — data-sync groups can have
-    // multiple remote backends for redundancy.
     const addBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 添加后端');
     on(addBtn, 'click', () => { void this.handleAddBackend(); });
     section.appendChild(addBtn);
@@ -546,12 +523,11 @@ export class SyncGroupConfiguratorCore {
 
   private buildLocalBackendItem(): HTMLElement {
     const li = el('li', { className: 'zfui-backend-item zfui-backend-item-primary' });
-    const info = el('div', {}, [
+    li.appendChild(el('div', {}, [
       el('span', { className: 'zfui-backend-name' }, 'local-idb'),
       el('span', { className: 'zfui-backend-type' }, 'IndexedDB'),
       el('span', { className: 'zfui-badge zfui-badge-primary', style: 'margin-left:8px' }, '本地主后端'),
-    ]);
-    li.appendChild(info);
+    ]));
     return li;
   }
 
@@ -577,7 +553,6 @@ export class SyncGroupConfiguratorCore {
 
     const actions = el('div', { className: 'zfui-backend-item-actions' });
 
-    // Copy config string button
     const copyBtn = el('button', {
       className: 'zfui-btn zfui-btn-sm zfui-btn-secondary',
       title: '复制配置字符串',
