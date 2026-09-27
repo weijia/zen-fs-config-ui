@@ -99,55 +99,97 @@ export class SyncGroupConfiguratorCore {
 
   private saveBackendInfo(info: BackendInfo): void {
     const str = JSON.stringify(info);
+    const key = STORAGE_KEY;
     // Layer 1: localStorage (works in production)
-    try { localStorage.setItem(STORAGE_KEY, str); return; } catch { /* fall through */ }
+    try {
+      localStorage.setItem(key, str);
+      console.log(`[zen-fs-config-ui] saveBackendInfo: saved to localStorage (key=${key}, type=${info.type}, ${str.length} chars)`);
+      return;
+    } catch (e) {
+      console.log(`[zen-fs-config-ui] saveBackendInfo: localStorage failed (${e instanceof Error ? e.message : e}), trying sessionStorage`);
+    }
     // Layer 2: sessionStorage (might survive in some sandboxes)
-    try { sessionStorage.setItem(STORAGE_KEY, str); return; } catch { /* fall through */ }
+    try {
+      sessionStorage.setItem(key, str);
+      console.log(`[zen-fs-config-ui] saveBackendInfo: saved to sessionStorage (key=${key}, type=${info.type}, ${str.length} chars)`);
+      return;
+    } catch (e) {
+      console.log(`[zen-fs-config-ui] saveBackendInfo: sessionStorage failed (${e instanceof Error ? e.message : e}), trying cookie`);
+    }
     // Layer 3: cookie (limited size but might persist)
     try {
-      document.cookie = `${STORAGE_KEY}=${encodeURIComponent(str)};path=/;max-age=31536000`;
-      console.log('[zen-fs-config-ui] saved BackendInfo to cookie (localStorage unavailable)');
+      document.cookie = `${key}=${encodeURIComponent(str)};path=/;max-age=31536000`;
+      console.log(`[zen-fs-config-ui] saveBackendInfo: saved to cookie (key=${key}, type=${info.type}, ${str.length} chars)`);
       return;
-    } catch { /* give up */ }
-    console.warn('[zen-fs-config-ui] no storage available — BackendInfo not persisted');
+    } catch (e) {
+      console.log(`[zen-fs-config-ui] saveBackendInfo: cookie failed (${e instanceof Error ? e.message : e})`);
+    }
+    console.warn(`[zen-fs-config-ui] saveBackendInfo: ALL storage layers failed — BackendInfo (type=${info.type}) NOT persisted`);
   }
 
   private loadBackendInfo(): BackendInfo | null {
+    const key = STORAGE_KEY;
     // Layer 1: localStorage
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) return this.parseBackendInfo(raw);
-    } catch { /* fall through */ }
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        console.log(`[zen-fs-config-ui] loadBackendInfo: found in localStorage (key=${key}, ${raw.length} chars)`);
+        return this.parseBackendInfo(raw, 'localStorage');
+      }
+      console.log(`[zen-fs-config-ui] loadBackendInfo: localStorage empty (key=${key})`);
+    } catch (e) {
+      console.log(`[zen-fs-config-ui] loadBackendInfo: localStorage access failed (${e instanceof Error ? e.message : e})`);
+    }
     // Layer 2: sessionStorage
     try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (raw) return this.parseBackendInfo(raw);
-    } catch { /* fall through */ }
+      const raw = sessionStorage.getItem(key);
+      if (raw) {
+        console.log(`[zen-fs-config-ui] loadBackendInfo: found in sessionStorage (key=${key}, ${raw.length} chars)`);
+        return this.parseBackendInfo(raw, 'sessionStorage');
+      }
+      console.log(`[zen-fs-config-ui] loadBackendInfo: sessionStorage empty (key=${key})`);
+    } catch (e) {
+      console.log(`[zen-fs-config-ui] loadBackendInfo: sessionStorage access failed (${e instanceof Error ? e.message : e})`);
+    }
     // Layer 3: cookie
     try {
       const match = document.cookie.match(/zenfs-config-ui:backend=([^;]+)/);
-      if (match) return this.parseBackendInfo(decodeURIComponent(match[1]));
-    } catch { /* fall through */ }
+      if (match) {
+        const raw = decodeURIComponent(match[1]);
+        console.log(`[zen-fs-config-ui] loadBackendInfo: found in cookie (key=${key}, ${raw.length} chars)`);
+        return this.parseBackendInfo(raw, 'cookie');
+      }
+      console.log(`[zen-fs-config-ui] loadBackendInfo: cookie not found (key=${key})`);
+    } catch (e) {
+      console.log(`[zen-fs-config-ui] loadBackendInfo: cookie access failed (${e instanceof Error ? e.message : e})`);
+    }
+    console.log(`[zen-fs-config-ui] loadBackendInfo: no saved BackendInfo found in any storage layer`);
     return null;
   }
 
-  private parseBackendInfo(raw: string): BackendInfo | null {
+  private parseBackendInfo(raw: string, source: string): BackendInfo | null {
     try {
       const parsed = JSON.parse(raw);
       if (parsed?.type && parsed?.options) {
-        console.log(`[zen-fs-config-ui] restored BackendInfo: type=${parsed.type}`);
+        console.log(`[zen-fs-config-ui] loadBackendInfo: parsed OK (source=${source}, type=${parsed.type})`);
         return parsed;
       }
-    } catch { /* ignore */ }
+      console.warn(`[zen-fs-config-ui] loadBackendInfo: parsed data invalid (source=${source}, missing type/options)`, parsed);
+    } catch (e) {
+      console.warn(`[zen-fs-config-ui] loadBackendInfo: JSON parse failed (source=${source}, ${e instanceof Error ? e.message : e})`);
+    }
     return null;
   }
 
   private clearBackendInfo(): void {
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
-    try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    const key = STORAGE_KEY;
+    console.log(`[zen-fs-config-ui] clearBackendInfo: clearing all storage layers (key=${key})`);
+    try { localStorage.removeItem(key); console.log(`  localStorage: cleared`); } catch (e) { console.log(`  localStorage: failed (${e instanceof Error ? e.message : e})`); }
+    try { sessionStorage.removeItem(key); console.log(`  sessionStorage: cleared`); } catch (e) { console.log(`  sessionStorage: failed (${e instanceof Error ? e.message : e})`); }
     try {
-      document.cookie = `${STORAGE_KEY}=;path=/;max-age=0`;
-    } catch { /* ignore */ }
+      document.cookie = `${key}=;path=/;max-age=0`;
+      console.log(`  cookie: cleared`);
+    } catch (e) { console.log(`  cookie: failed (${e instanceof Error ? e.message : e})`); }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────
