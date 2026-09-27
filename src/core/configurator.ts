@@ -17,6 +17,7 @@ import type {
   CoreEventMap,
   CoreEventListener,
   BackendMetadata,
+  BackendInfo,
 } from '../types.js';
 import {
   connectGroup,
@@ -40,6 +41,8 @@ import { serializeBackend } from './config-string.js';
  * backend (shown separately), and InMemory is a Node.js-only local.
  */
 const LOCAL_BACKEND_TYPES = new Set(['IndexedDB', 'InMemory']);
+
+const STORAGE_KEY_PREFIX = 'zenfs-config-ui:';
 
 export class SyncGroupConfiguratorCore {
   private container: HTMLElement;
@@ -72,16 +75,46 @@ export class SyncGroupConfiguratorCore {
     this.injectStyles();
   }
 
+  // ── localStorage persistence ────────────────────────────────────────
+
+  private get storageKey(): string {
+    return `${STORAGE_KEY_PREFIX}${this.props.appId}`;
+  }
+
+  private saveBackendInfo(info: BackendInfo): void {
+    try {
+      localStorage.setItem(this.storageKey, JSON.stringify(info));
+    } catch { /* localStorage may be unavailable (private mode, sandbox) */ }
+  }
+
+  private loadBackendInfo(): BackendInfo | null {
+    try {
+      const raw = localStorage.getItem(this.storageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.type === 'string' && parsed.options) return parsed;
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  private clearBackendInfo(): void {
+    try { localStorage.removeItem(this.storageKey); } catch { /* ignore */ }
+  }
+
   // ── Lifecycle ────────────────────────────────────────────────────────
 
   async mount(): Promise<void> {
     this.metadata = getBackendMetadataList().filter(
       (m) => !LOCAL_BACKEND_TYPES.has(m.type),
     );
+    // Try to restore a previously connected backend from localStorage.
+    const saved = this.loadBackendInfo();
     if (this.props.backendInfo) {
       await this.connect(this.props.backendInfo);
+    } else if (saved) {
+      await this.connect(saved);
     } else {
-      // No remote backend — start in local config-sync mode
+      // No remote backend — start in local-only mode
       await this.connect(undefined);
     }
   }
@@ -118,7 +151,7 @@ export class SyncGroupConfiguratorCore {
 
   // ── Connection ───────────────────────────────────────────────────────
 
-  private async connect(backendInfo?: CoreProps['backendInfo']): Promise<void> {
+  private async connect(backendInfo?: BackendInfo): Promise<void> {
     this.connecting = true;
     this.error = null;
     this.render();
@@ -129,20 +162,26 @@ export class SyncGroupConfiguratorCore {
       if (result.repo) {
         this.repo = result.repo;
         this.mode = 'config-sync';
+        // Persist the remote backend so we can reconnect on refresh.
+        if (backendInfo) this.saveBackendInfo(backendInfo);
         await this.loadConfigBackends();
         await this.loadDataGroups();
       } else if (result.dataGroup) {
         this.dataGroup = result.dataGroup;
         this.mode = 'data-sync';
+        if (backendInfo) this.saveBackendInfo(backendInfo);
         this.dataBackends = listDataBackends(result.dataGroup);
       }
 
       this.emit('connected', {
         groupType: this.mode,
-        backendId: backendInfo ? this.configBackends[0]?.id : undefined,
+        backendId: backendInfo ? this.dataBackends[0]?.id ?? this.configBackends[0]?.id : undefined,
       });
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
+      // If the saved backend is no longer reachable, clear it so we don't
+      // keep retrying a dead connection on every refresh.
+      if (backendInfo) this.clearBackendInfo();
       this.emit('error', { message: this.error });
     } finally {
       this.connecting = false;
@@ -207,7 +246,22 @@ export class SyncGroupConfiguratorCore {
           this.dataBackends = listDataBackends(this.dataGroup);
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'data-sync' });
         } else {
-          await this.connect({ type: result.type, options: result.options });
+          // Initial mode: show the backend immediately, then connect in
+          // the background so the user doesn't stare at a blank screen.
+          this.dataBackends = [{
+            id: result.id,
+            type: result.type,
+            options: result.options,
+            description: result.description,
+          }];
+          this.mode = 'data-sync';
+          this.showForm = false;
+          this.render();
+          // Persist + connect without blocking the UI
+          const info: BackendInfo = { type: result.type, options: result.options };
+          this.saveBackendInfo(info);
+          void this.connect(info);
+          return;
         }
         this.showForm = false;
         this.render();
@@ -224,9 +278,17 @@ export class SyncGroupConfiguratorCore {
       if (this.mode === 'config-sync' && this.repo) {
         await removeConfigBackend(this.repo, id);
         await this.loadConfigBackends();
+        if (this.configBackends.length === 0) this.clearBackendInfo();
       } else if (this.mode === 'data-sync' && this.dataGroup) {
         await removeDataBackend(this.dataGroup, id);
         this.dataBackends = listDataBackends(this.dataGroup);
+        // If only the local backend remains, clear saved info and reset.
+        if (this.dataBackends.length <= 1) {
+          this.clearBackendInfo();
+          this.mode = 'initial';
+          this.dataGroup = null;
+          this.dataBackends = [];
+        }
       }
       this.emit('backend-removed', { backendId: id });
       this.render();
