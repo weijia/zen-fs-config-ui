@@ -106,16 +106,26 @@ export class SyncGroupConfiguratorCore {
   private saveState(state: { primaryBackend: BackendInfo; backends: BackendDescriptor[] }): void {
     try {
       localStorage.setItem(this.storageKey, JSON.stringify(state));
-    } catch { /* localStorage may be unavailable */ }
+      console.log(`[zen-fs-config-ui] saved state to localStorage (key=${this.storageKey}, ${state.backends.length} backends)`);
+    } catch (e) {
+      console.warn(`[zen-fs-config-ui] failed to save state:`, e);
+    }
   }
 
   private loadState(): { primaryBackend: BackendInfo; backends: BackendDescriptor[] } | null {
     try {
       const raw = localStorage.getItem(this.storageKey);
+      console.log(`[zen-fs-config-ui] loadState: key=${this.storageKey}, raw=${raw ? `${raw.length} chars` : 'null'}`);
       if (!raw) return null;
       const parsed = JSON.parse(raw);
-      if (parsed?.primaryBackend?.type && parsed?.backends instanceof Array) return parsed;
-    } catch { /* ignore */ }
+      if (parsed?.primaryBackend?.type && parsed?.backends instanceof Array) {
+        console.log(`[zen-fs-config-ui] loadState: restored ${parsed.backends.length} backends, primaryBackend.type=${parsed.primaryBackend.type}`);
+        return parsed;
+      }
+      console.warn(`[zen-fs-config-ui] loadState: parsed data invalid`, parsed);
+    } catch (e) {
+      console.warn(`[zen-fs-config-ui] loadState: error`, e);
+    }
     return null;
   }
 
