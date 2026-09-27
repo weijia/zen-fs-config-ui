@@ -26,10 +26,12 @@ npm install zen-fs-config-ui zen-fs-config
 Drop the IIFE bundle in via a `<script>` tag — no bundler, no NPM install:
 
 ```html
-<script src="https://unpkg.com/zen-fs-config-ui"></script>
+<script src="https://unpkg.com/zen-fs-config-ui/dist/zen-fs-config-ui.js"></script>
 ```
 
 This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element. The global `window.ZenFSConfigUI` exposes `registerBackend()`, `wrapZenFSFileSystem()`, and `listBackendMetadata()` so you can register backend types from other CDN `<script>` tags.
+
+> **Note:** Always use the explicit path `/dist/zen-fs-config-ui.js` (the IIFE bundle). The bare `https://unpkg.com/zen-fs-config-ui` resolves to the CJS build and will throw `module is not defined` in browsers.
 
 #### Complete browser example (Gitee + RemoteStorage, script tags only)
 
@@ -42,7 +44,7 @@ This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` 
 </head>
 <body>
   <!-- 1. UI bundle — auto-registers <sync-group-configurator> and exposes ZenFSConfigUI -->
-  <script src="https://unpkg.com/zen-fs-config-ui"></script>
+  <script src="https://unpkg.com/zen-fs-config-ui/dist/zen-fs-config-ui.js"></script>
 
   <!-- 2. Backend implementations (load their global builds) -->
   <script src="https://unpkg.com/zen-fs-gitee/dist/zen-fs-gitee.global.js"></script>
