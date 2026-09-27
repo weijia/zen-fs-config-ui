@@ -1,6 +1,6 @@
 {
   "name": "zen-fs-config-ui",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "type": "module",
   "description": "UI control for configuring zen-fs-config sync groups (config-sync / data-sync). Provides both Web Component and React bindings.",
   "main": "dist/index.cjs",

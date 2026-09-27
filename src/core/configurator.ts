@@ -463,6 +463,11 @@ export class SyncGroupConfiguratorCore {
       return;
     }
 
+    if (this.backgroundConnecting && this.mode === 'initial') {
+      this.container.appendChild(el('div', { className: 'zfui-loading' }, '正在恢复后端连接...'));
+      return;
+    }
+
     if (this.error && this.mode === 'initial') {
       this.container.appendChild(this.buildErrorView());
       return;
