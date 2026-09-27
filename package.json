@@ -1,12 +1,13 @@
 {
   "name": "zen-fs-config-ui",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "UI control for configuring zen-fs-config sync groups (config-sync / data-sync). Provides both Web Component and React bindings.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "browser": "dist/zen-fs-config-ui.js",
+  "unpkg": "dist/zen-fs-config-ui.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
