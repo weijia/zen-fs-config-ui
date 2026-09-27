@@ -7,6 +7,8 @@ It lets users manage **config-sync** and **data-sync** backends through a graphi
 ## Features
 
 - **Unified backend form** — one form for all backend types; fields are generated dynamically from `zen-fs-config` backend metadata.
+- **Inline form (no popup)** — the backend form renders inline below the backend list, not in a modal dialog.
+- **Config string import / export** — paste a `type:id:key=value,...` string to auto-fill the form; click 📋 on any backend to copy its config string.
 - **Auto group-type detection** — connects to a backend and reads `/.meta/group-type`; new backends default to `data-sync`.
 - **Local-first** — always starts with a local IndexedDB primary backend (no "skip" step).
 - **Two view modes** — `config-sync` shows sync backends + data groups; `data-sync` shows sync backends only.
@@ -29,7 +31,7 @@ Drop the IIFE bundle in via a `<script>` tag — no bundler, no NPM install:
 <script src="https://unpkg.com/zen-fs-config-ui/dist/zen-fs-config-ui.js"></script>
 ```
 
-This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element. The global `window.ZenFSConfigUI` exposes `registerBackend()`, `wrapZenFSFileSystem()`, and `listBackendMetadata()` so you can register backend types from other CDN `<script>` tags.
+This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element. The global `window.ZenFSConfigUI` exposes `registerBackend()`, `wrapZenFSFileSystem()`, `listBackendMetadata()`, `serializeBackend()`, and `deserializeBackend()` so you can register backend types from other CDN `<script>` tags.
 
 > **Note:** Always use the explicit path `/dist/zen-fs-config-ui.js` (the IIFE bundle). The bare `https://unpkg.com/zen-fs-config-ui` resolves to the CJS build and will throw `module is not defined` in browsers.
 
@@ -136,6 +138,8 @@ The IIFE bundle includes `zen-fs-config` internally but does **not** include any
 ZenFSConfigUI.registerBackend(type, factory, metadata);
 ZenFSConfigUI.wrapZenFSFileSystem(config);   // wrap a ZenFS Backend or FileSystem
 ZenFSConfigUI.listBackendMetadata();           // → array of registered types
+ZenFSConfigUI.serializeBackend(type, id, options, description?);  // → config string
+ZenFSConfigUI.deserializeBackend(str, metadataList);                // → parsed backend
 ```
 
 The `factory` receives the form options and must return a `BackendInstance`. Use `wrapZenFSFileSystem` to adapt a ZenFS `Backend` (e.g. `Gitee`) or a ZenFS `FileSystem` (e.g. from `createRemoteStorageFileSystem`):
@@ -150,6 +154,33 @@ wrapZenFSFileSystem(fs);
 ```
 
 The `<sync-group-configurator>` reads the registered metadata to render the backend type selector and dynamic form fields. If no backends are registered, the "添加后端" form will have an empty type list.
+
+#### Config string format
+
+Each backend can be serialized to a one-line config string and pasted back into the form's **"从配置字符串导入"** field. The format is:
+
+```
+type:id:key=value,key=value,desc=description
+```
+
+**Example:**
+
+```
+Gitee:my-repo:owner=weijia,repo=configs,branch=master,desc=personal configs
+```
+
+- Click the **📋** button on any backend to copy its config string.
+- Paste a config string into the import field and click **导入** to auto-fill all form fields.
+
+You can also use the global helpers directly:
+
+```js
+const str = ZenFSConfigUI.serializeBackend('Gitee', 'my-repo', { owner: 'weijia', repo: 'configs' }, 'personal');
+// → "Gitee:my-repo:owner=weijia,repo=configs,desc=personal"
+
+const parsed = ZenFSConfigUI.deserializeBackend(str, ZenFSConfigUI.listBackendMetadata());
+// → { type: 'Gitee', id: 'my-repo', options: {...}, description: 'personal' }
+```
 
 ### Via esm.sh (CDN)
 
