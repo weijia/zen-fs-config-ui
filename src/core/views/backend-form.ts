@@ -7,6 +7,22 @@
  */
 import type { BackendMetadata } from '../../types.js';
 import { el, on, clear } from '../render.js';
+import { STYLES } from '../styles.js';
+
+/**
+ * The modal is appended to document.body (outside the shadow root), so the
+ * shadow-DOM styles don't reach it. Inject the full stylesheet into
+ * document.head once. The `zfui-` prefix keeps it from leaking into the host.
+ */
+let globalStylesInjected = false;
+function injectGlobalStyles(): void {
+  if (globalStylesInjected) return;
+  const style = document.createElement('style');
+  style.setAttribute('data-zfui', '');
+  style.textContent = STYLES;
+  document.head.appendChild(style);
+  globalStylesInjected = true;
+}
 
 export interface BackendFormResult {
   id: string;
@@ -29,6 +45,8 @@ interface BackendFormOptions {
 
 export function openBackendForm(opts: BackendFormOptions): void {
   const { metadataList, defaultType, title, onSubmit, onCancel } = opts;
+
+  injectGlobalStyles();
 
   const overlay = el('div', { className: 'zfui-modal-overlay' });
   const modal = el('div', { className: 'zfui-modal' });

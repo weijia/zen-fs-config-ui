@@ -167,6 +167,11 @@ export class SyncGroupConfiguratorCore {
   // ── Actions ──────────────────────────────────────────────────────────
 
   async handleAddBackend(): Promise<void> {
+    // Re-read metadata at open time so backends registered after mount()
+    // (e.g. late-loaded CDN scripts) are still available in the selector.
+    this.metadata = getBackendMetadataList().filter(
+      (m) => !LOCAL_BACKEND_TYPES.has(m.type),
+    );
     openBackendForm({
       metadataList: this.metadata,
       onSubmit: async (result) => {
@@ -207,6 +212,9 @@ export class SyncGroupConfiguratorCore {
 
   async handleAddDataGroup(): Promise<void> {
     if (!this.repo) return;
+    this.metadata = getBackendMetadataList().filter(
+      (m) => !LOCAL_BACKEND_TYPES.has(m.type),
+    );
     openBackendForm({
       metadataList: this.metadata,
       title: '新增数据同步组',
