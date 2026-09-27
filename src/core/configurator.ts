@@ -32,6 +32,7 @@ import {
 import { el, on, clear } from './render.js';
 import { STYLES } from './styles.js';
 import { openBackendForm } from './views/backend-form.js';
+import { serializeBackend } from './config-string.js';
 
 /**
  * Built-in local backend types that should never appear in the
@@ -58,6 +59,9 @@ export class SyncGroupConfiguratorCore {
 
   private metadata: BackendMetadata[] = [];
   private styleEl: HTMLStyleElement | null = null;
+  private showForm = false;
+  private formContainer: HTMLElement | null = null;
+  private formKind: 'backend' | 'data-group' = 'backend';
 
   private listeners: Map<CoreEventName, Set<CoreEventListener>> = new Map();
 
@@ -167,15 +171,34 @@ export class SyncGroupConfiguratorCore {
   // ── Actions ──────────────────────────────────────────────────────────
 
   async handleAddBackend(): Promise<void> {
-    // Re-read metadata at open time so backends registered after mount()
-    // (e.g. late-loaded CDN scripts) are still available in the selector.
     this.metadata = getBackendMetadataList().filter(
       (m) => !LOCAL_BACKEND_TYPES.has(m.type),
     );
+    this.formKind = 'backend';
+    this.showForm = true;
+    this.render();
+  }
+
+  private openInlineForm(): void {
+    if (!this.formContainer) return;
+    const isDataGroup = this.formKind === 'data-group';
     openBackendForm({
       metadataList: this.metadata,
+      container: this.formContainer,
+      mode: 'inline',
+      title: isDataGroup ? '新增数据同步组' : '添加后端',
       onSubmit: async (result) => {
-        if (this.mode === 'config-sync' && this.repo) {
+        if (isDataGroup) {
+          if (!this.repo) return;
+          await this.repo.createAppDataGroup(result.id, [{
+            id: result.id,
+            type: result.type,
+            options: result.options,
+            description: result.description,
+          }]);
+          await this.loadDataGroups();
+          this.emit('data-group-created', { groupId: result.id });
+        } else if (this.mode === 'config-sync' && this.repo) {
           await addConfigBackend(this.repo, result.id, result.type, result.options, result.description);
           await this.loadConfigBackends();
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'config-sync' });
@@ -184,12 +207,15 @@ export class SyncGroupConfiguratorCore {
           this.dataBackends = listDataBackends(this.dataGroup);
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'data-sync' });
         } else {
-          // initial mode — connect with this backend
           await this.connect({ type: result.type, options: result.options });
         }
+        this.showForm = false;
         this.render();
       },
-      onCancel: () => { /* noop */ },
+      onCancel: () => {
+        this.showForm = false;
+        this.render();
+      },
     });
   }
 
@@ -215,23 +241,9 @@ export class SyncGroupConfiguratorCore {
     this.metadata = getBackendMetadataList().filter(
       (m) => !LOCAL_BACKEND_TYPES.has(m.type),
     );
-    openBackendForm({
-      metadataList: this.metadata,
-      title: '新增数据同步组',
-      onSubmit: async (result) => {
-        // createAppDataGroup expects an array of backends; we create with one
-        await this.repo!.createAppDataGroup(result.id, [{
-          id: result.id,
-          type: result.type,
-          options: result.options,
-          description: result.description,
-        }]);
-        await this.loadDataGroups();
-        this.emit('data-group-created', { groupId: result.id });
-        this.render();
-      },
-      onCancel: () => { /* noop */ },
-    });
+    this.formKind = 'data-group';
+    this.showForm = true;
+    this.render();
   }
 
   // ── Rendering ────────────────────────────────────────────────────────
@@ -283,6 +295,15 @@ export class SyncGroupConfiguratorCore {
     } else {
       this.container.appendChild(this.buildInitialView());
     }
+
+    // Inline form (rendered below the section, no popup)
+    if (this.showForm) {
+      this.formContainer = el('div', { className: 'zfui-form-slot' });
+      this.container.appendChild(this.formContainer);
+      this.openInlineForm();
+    } else {
+      this.formContainer = null;
+    }
   }
 
   private getSubtitle(): string {
@@ -322,7 +343,7 @@ export class SyncGroupConfiguratorCore {
     const list = el('ul', { className: 'zfui-backend-list' });
     list.appendChild(this.buildLocalBackendItem());
     for (const b of this.configBackends) {
-      list.appendChild(this.buildBackendItem(b.id, b.type, b.description, true));
+      list.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true));
     }
     syncSection.appendChild(list);
 
@@ -364,7 +385,7 @@ export class SyncGroupConfiguratorCore {
     const list = el('ul', { className: 'zfui-backend-list' });
     list.appendChild(this.buildLocalBackendItem());
     for (const b of this.dataBackends) {
-      list.appendChild(this.buildBackendItem(b.id, b.type, b.description, true));
+      list.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true));
     }
     section.appendChild(list);
 
@@ -402,6 +423,7 @@ export class SyncGroupConfiguratorCore {
   private buildBackendItem(
     id: string,
     type: string,
+    options: Record<string, unknown>,
     description: string | undefined,
     removable: boolean,
   ): HTMLElement {
@@ -418,6 +440,26 @@ export class SyncGroupConfiguratorCore {
     }
     li.appendChild(info);
 
+    const actions = el('div', { className: 'zfui-backend-item-actions' });
+
+    // Copy config string button
+    const copyBtn = el('button', {
+      className: 'zfui-btn zfui-btn-sm zfui-btn-secondary',
+      title: '复制配置字符串',
+    }, '📋');
+    on(copyBtn, 'click', async () => {
+      const str = serializeBackend(type, id, options, description);
+      try {
+        await navigator.clipboard.writeText(str);
+        copyBtn.textContent = '✓';
+        setTimeout(() => { copyBtn.textContent = '📋'; }, 1500);
+      } catch {
+        // Fallback: show the string in an alert
+        prompt('复制以下配置字符串:', str);
+      }
+    });
+    actions.appendChild(copyBtn);
+
     if (removable) {
       const removeBtn = el('button', { className: 'zfui-btn zfui-btn-sm zfui-btn-danger' }, '删除');
       on(removeBtn, 'click', () => {
@@ -425,9 +467,10 @@ export class SyncGroupConfiguratorCore {
           void this.handleRemoveBackend(id);
         }
       });
-      li.appendChild(removeBtn);
+      actions.appendChild(removeBtn);
     }
 
+    li.appendChild(actions);
     return li;
   }
 }

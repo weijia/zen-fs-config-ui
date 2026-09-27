@@ -1,19 +1,18 @@
 /**
- * Backend configuration modal form.
+ * Backend configuration form.
  *
- * Renders a modal with a backend-type selector and dynamically generated
- * fields (from BackendMetadata.fields). On submit, calls the provided
- * handler with the collected { id, type, options, description }.
+ * Supports two rendering modes:
+ *  - 'modal'  (default): overlay appended to document.body
+ *  - 'inline': rendered into the provided container element (no popup)
+ *
+ * The form includes an "Import from config string" feature that parses a
+ * `type:id:key=value,...` string and fills all fields automatically.
  */
 import type { BackendMetadata } from '../../types.js';
 import { el, on, clear } from '../render.js';
 import { STYLES } from '../styles.js';
+import { deserializeBackend } from '../config-string.js';
 
-/**
- * The modal is appended to document.body (outside the shadow root), so the
- * shadow-DOM styles don't reach it. Inject the full stylesheet into
- * document.head once. The `zfui-` prefix keeps it from leaking into the host.
- */
 let globalStylesInjected = false;
 function injectGlobalStyles(): void {
   if (globalStylesInjected) return;
@@ -35,22 +34,40 @@ interface BackendFormOptions {
   metadataList: BackendMetadata[];
   defaultType?: string;
   title?: string;
-  /** If true, include an "account backend" selector for account reuse. */
   allowAccountReuse?: boolean;
-  /** Available account backends (id → label) for reuse. */
   accountBackends?: { id: string; label: string }[];
+  /** Render mode: 'modal' (default) or 'inline'. */
+  mode?: 'modal' | 'inline';
+  /** Required when mode === 'inline'. The form is rendered into this element. */
+  container?: HTMLElement;
   onSubmit: (result: BackendFormResult) => Promise<void> | void;
   onCancel: () => void;
 }
 
-export function openBackendForm(opts: BackendFormOptions): void {
+/**
+ * Open a backend form. In 'inline' mode, returns the form's root element so
+ * the caller can show/hide it. In 'modal' mode, returns null (modal is
+ * self-managed).
+ */
+export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
   const { metadataList, defaultType, title, onSubmit, onCancel } = opts;
+  const mode = opts.mode ?? 'modal';
 
-  injectGlobalStyles();
+  if (mode === 'modal') injectGlobalStyles();
 
-  const overlay = el('div', { className: 'zfui-modal-overlay' });
-  const modal = el('div', { className: 'zfui-modal' });
-  overlay.appendChild(modal);
+  const root = mode === 'inline'
+    ? el('div', { className: 'zfui-inline-form' })
+    : el('div', { className: 'zfui-modal' });
+
+  if (mode === 'modal') {
+    const overlay = el('div', { className: 'zfui-modal-overlay' });
+    overlay.appendChild(root);
+    on(overlay, 'click', (e: MouseEvent) => { if (e.target === overlay) close(); });
+    document.body.appendChild(overlay);
+  } else if (opts.container) {
+    clear(opts.container);
+    opts.container.appendChild(root);
+  }
 
   const type = defaultType ?? metadataList[0]?.type ?? '';
   const state = {
@@ -59,22 +76,59 @@ export function openBackendForm(opts: BackendFormOptions): void {
     description: '',
     options: {} as Record<string, string>,
     accountBackendId: '' as string,
+    importStr: '',
+    importError: '',
   };
 
-  // Init default options for the default type
-  const initialMeta = metadataList.find(m => m.type === type);
+  const initialMeta = metadataList.find((m) => m.type === type);
   if (initialMeta) {
     state.options = { ...initialMeta.defaultOptions };
     state.id = `${type.toLowerCase()}-${Date.now().toString(36)}`;
   }
 
   function render(): void {
-    clear(modal);
-    const meta = metadataList.find(m => m.type === state.type);
+    clear(root);
+    const meta = metadataList.find((m) => m.type === state.type);
 
-    modal.appendChild(el('div', { className: 'zfui-modal-title' }, title ?? '添加后端'));
+    root.appendChild(el('div', { className: 'zfui-modal-title' }, title ?? '添加后端'));
 
-    // Backend type selector
+    // ── Import from config string ──────────────────────────────────────
+    const importGroup = el('div', { className: 'zfui-form-group' });
+    importGroup.appendChild(el('label', { className: 'zfui-form-label' }, '从配置字符串导入（可选）'));
+    const importRow = el('div', { className: 'zfui-form-row' });
+    const importInput = el('input', {
+      className: 'zfui-form-input',
+      value: state.importStr,
+      placeholder: 'type:id:key=value,key=value',
+      style: 'font-family:monospace;font-size:12px;flex:1',
+    });
+    on(importInput, 'input', () => { state.importStr = importInput.value; });
+    const importBtn = el('button', { className: 'zfui-btn zfui-btn-sm' }, '导入');
+    on(importBtn, 'click', () => {
+      const parsed = deserializeBackend(state.importStr, metadataList);
+      if (!parsed) {
+        state.importError = '格式无效或未知类型。示例: Gitee:my-repo:owner=weijia,repo=configs';
+        render();
+        return;
+      }
+      state.type = parsed.type;
+      state.id = parsed.id;
+      state.options = { ...parsed.options };
+      state.description = parsed.description;
+      state.importError = '';
+      render();
+    });
+    importRow.appendChild(importInput);
+    importRow.appendChild(importBtn);
+    importGroup.appendChild(importRow);
+    if (state.importError) {
+      importGroup.appendChild(el('div', { className: 'zfui-form-error' }, state.importError));
+    }
+    root.appendChild(importGroup);
+
+    root.appendChild(el('div', { className: 'zfui-divider' }));
+
+    // ── Backend type selector ──────────────────────────────────────────
     const typeGroup = el('div', { className: 'zfui-form-group' });
     typeGroup.appendChild(el('label', { className: 'zfui-form-label' }, '后端类型'));
     const typeSelect = el('select', { className: 'zfui-form-select' });
@@ -85,37 +139,36 @@ export function openBackendForm(opts: BackendFormOptions): void {
     }
     on(typeSelect, 'change', () => {
       state.type = typeSelect.value;
-      const newMeta = metadataList.find(m => m.type === state.type);
+      const newMeta = metadataList.find((m) => m.type === state.type);
       if (newMeta) {
         state.options = { ...newMeta.defaultOptions };
-        if (!state.id || state.id.startsWith(type.toLowerCase())) {
+        if (!state.id || /^[a-z]+-[a-z0-9]+$/.test(state.id)) {
           state.id = `${newMeta.type.toLowerCase()}-${Date.now().toString(36)}`;
         }
       }
       render();
     });
     typeGroup.appendChild(typeSelect);
-    modal.appendChild(typeGroup);
+    root.appendChild(typeGroup);
 
-    // ID
+    // ── ID ─────────────────────────────────────────────────────────────
     const idGroup = el('div', { className: 'zfui-form-group' });
     idGroup.appendChild(el('label', { className: 'zfui-form-label' }, 'ID'));
     const idInput = el('input', {
       className: 'zfui-form-input',
       value: state.id,
       placeholder: 'backend-id',
+      style: 'font-family:monospace',
     });
     on(idInput, 'input', () => { state.id = idInput.value; });
     idGroup.appendChild(idInput);
-    modal.appendChild(idGroup);
+    root.appendChild(idGroup);
 
-    // Dynamic fields
+    // ── Dynamic fields ─────────────────────────────────────────────────
     if (meta) {
-      // Determine which fields are "account fields" (reusable) vs "storage fields"
       const accountFields = new Set(meta.accountFields ?? []);
       const hasAccountReuse = opts.allowAccountReuse && accountFields.size > 0 && (opts.accountBackends?.length ?? 0) > 0;
 
-      // Account backend selector (only when reuse is available)
       if (hasAccountReuse) {
         const accGroup = el('div', { className: 'zfui-form-group' });
         accGroup.appendChild(el('label', { className: 'zfui-form-label' }, '复用账户（可选）'));
@@ -126,12 +179,10 @@ export function openBackendForm(opts: BackendFormOptions): void {
         }
         on(accSelect, 'change', () => { state.accountBackendId = accSelect.value; render(); });
         accGroup.appendChild(accSelect);
-        modal.appendChild(accGroup);
+        root.appendChild(accGroup);
       }
 
-      // Field inputs
       for (const field of meta.fields) {
-        // If reusing account, skip account fields
         if (hasAccountReuse && state.accountBackendId && accountFields.has(field.key)) continue;
 
         const fg = el('div', { className: 'zfui-form-group' });
@@ -158,19 +209,19 @@ export function openBackendForm(opts: BackendFormOptions): void {
           on(input, 'input', () => { state.options[field.key] = input.value; });
           fg.appendChild(input);
         }
-        modal.appendChild(fg);
+        root.appendChild(fg);
       }
     }
 
-    // Description
+    // ── Description ────────────────────────────────────────────────────
     const descGroup = el('div', { className: 'zfui-form-group' });
     descGroup.appendChild(el('label', { className: 'zfui-form-label' }, '描述（可选）'));
     const descInput = el('input', { className: 'zfui-form-input', value: state.description });
     on(descInput, 'input', () => { state.description = descInput.value; });
     descGroup.appendChild(descInput);
-    modal.appendChild(descGroup);
+    root.appendChild(descGroup);
 
-    // Actions
+    // ── Actions ────────────────────────────────────────────────────────
     const actions = el('div', { className: 'zfui-actions' });
     const cancelBtn = el('button', { className: 'zfui-btn' }, '取消');
     on(cancelBtn, 'click', () => close());
@@ -196,15 +247,18 @@ export function openBackendForm(opts: BackendFormOptions): void {
       }
     });
     actions.appendChild(submitBtn);
-    modal.appendChild(actions);
+    root.appendChild(actions);
   }
 
   function close(): void {
-    overlay.remove();
+    if (mode === 'modal') {
+      root.parentElement?.remove();
+    } else if (opts.container) {
+      clear(opts.container);
+    }
     onCancel();
   }
 
-  on(overlay, 'click', (e: MouseEvent) => { if (e.target === overlay) close(); });
-  document.body.appendChild(overlay);
   render();
+  return mode === 'inline' ? root : null;
 }

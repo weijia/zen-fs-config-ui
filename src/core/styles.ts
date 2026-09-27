@@ -37,6 +37,8 @@ export const STYLES = `
 .zfui-btn:hover { background: #f9fafb; }
 .zfui-btn-primary { background: #2563eb; border-color: #2563eb; color: #fff; }
 .zfui-btn-primary:hover { background: #1d4ed8; }
+.zfui-btn-secondary { background: #f3f4f6; border-color: #d1d5db; color: #374151; }
+.zfui-btn-secondary:hover { background: #e5e7eb; }
 .zfui-btn-danger { color: #dc2626; border-color: #fecaca; }
 .zfui-btn-danger:hover { background: #fef2f2; }
 .zfui-btn-sm { padding: 3px 10px; font-size: 12px; }
@@ -88,6 +90,20 @@ export const STYLES = `
 }
 
 .zfui-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+.zfui-form-row { display: flex; gap: 8px; align-items: center; }
+.zfui-form-error { color: #dc2626; font-size: 12px; margin-top: 4px; }
+.zfui-divider { height: 1px; background: #e5e7eb; margin: 16px 0; }
+
+.zfui-inline-form {
+  border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px;
+  background: #fff; margin-top: 12px;
+}
+.zfui-backend-item-actions { display: flex; gap: 4px; align-items: center; }
+.zfui-copy-hint {
+  font-size: 11px; color: #6b7280; margin-top: 4px;
+  font-family: monospace; word-break: break-all;
+}
 
 .zfui-loading { text-align: center; color: #6b7280; padding: 40px; }
 .zfui-error {

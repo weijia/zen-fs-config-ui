@@ -18,6 +18,13 @@
  *   <sync-group-configurator app-id="my-app"></sync-group-configurator>
  */
 import { registerBackend, listBackendMetadata, wrapZenFSFileSystem } from 'zen-fs-config';
+import { serializeBackend, deserializeBackend } from './core/config-string.js';
 import './web-component/index.js';
 
-export { registerBackend, listBackendMetadata, wrapZenFSFileSystem };
+export {
+  registerBackend,
+  listBackendMetadata,
+  wrapZenFSFileSystem,
+  serializeBackend,
+  deserializeBackend,
+};
