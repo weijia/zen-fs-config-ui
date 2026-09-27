@@ -17,7 +17,7 @@ export default defineConfig([
   // ── Browser IIFE build: bundles core + web-component (NO React) ──────
   // Exposes window.ZenFSConfigUI with the web component auto-registered.
   {
-    entry: { 'zen-fs-config-ui': 'src/web-component/index.ts' },
+    entry: { 'zen-fs-config-ui': 'src/browser.ts' },
     format: ['iife'],
     globalName: 'ZenFSConfigUI',
     platform: 'browser',

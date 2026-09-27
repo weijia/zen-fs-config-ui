@@ -23,13 +23,78 @@ npm install zen-fs-config-ui zen-fs-config
 
 ### Browser (no build step)
 
-Drop the IIFE bundle in via a `<script>` tag:
+Drop the IIFE bundle in via a `<script>` tag — no bundler, no NPM install:
 
 ```html
-<script src="https://unpkg.com/zen-fs-config-ui/dist/zen-fs-config-ui.js"></script>
+<script src="https://unpkg.com/zen-fs-config-ui"></script>
 ```
 
-This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element.
+This bundles `zen-fs-config` and auto-registers the `<sync-group-configurator>` element. The global `window.ZenFSConfigUI` is exposed with `registerBackend()` and `listBackendMetadata()` so you can register backend types from other CDN modules.
+
+#### Complete browser example
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sync Group Configurator</title>
+</head>
+<body>
+  <!-- 1. Load the UI bundle (auto-registers <sync-group-configurator>) -->
+  <script src="https://unpkg.com/zen-fs-config-ui"></script>
+
+  <!-- 2. Register backend types before the element renders -->
+  <script type="module">
+    // Import a backend implementation from esm.sh (or any CDN)
+    const { factory, metadata } = await import('https://esm.sh/zen-fs-config-gitee');
+    ZenFSConfigUI.registerBackend('Gitee', factory, metadata);
+
+    // Register more backends as needed…
+    // const gh = await import('https://esm.sh/zen-fs-config-github');
+    // ZenFSConfigUI.registerBackend('GitHub', gh.factory, gh.metadata);
+  </script>
+
+  <!-- 3. Use the Web Component -->
+  <sync-group-configurator
+    app-id="my-app"
+    style="display:block;max-width:600px;margin:40px auto;"
+  ></sync-group-configurator>
+
+  <!-- 4. (Optional) Pre-configure a remote backend via attributes -->
+  <!--
+  <sync-group-configurator
+    app-id="my-app"
+    backend-type="Gitee"
+    backend-options='{"token":"xxx","owner":"weijia","repo":"configs"}'
+  ></sync-group-configurator>
+  -->
+
+  <script>
+    // 5. Listen for events
+    const el = document.querySelector('sync-group-configurator');
+    el.addEventListener('connected', (e) => {
+      console.log('connected, group type:', e.detail.groupType);
+    });
+    el.addEventListener('backend-added', (e) => {
+      console.log('backend added:', e.detail.backendId);
+    });
+  </script>
+</body>
+</html>
+```
+
+#### How backend registration works in the browser
+
+The IIFE bundle includes `zen-fs-config` internally but does **not** include any backend implementations (Gitee, GitHub, WebDAV, etc.). Those are separate packages you load from a CDN and register via the global:
+
+```js
+// Available on window.ZenFSConfigUI after the <script> loads:
+ZenFSConfigUI.registerBackend(type, factory, metadata);
+ZenFSConfigUI.listBackendMetadata();  // → array of registered types
+```
+
+The `<sync-group-configurator>` reads the registered metadata to render the backend type selector and dynamic form fields. If no backends are registered, the "添加后端" form will have an empty type list.
 
 ### Via esm.sh (CDN)
 
@@ -107,7 +172,9 @@ function App() {
 
 ### Registering backend types
 
-Before rendering the control, register the backend types you want to support via `zen-fs-config`:
+Before the control can show backend types in its form, you must register them:
+
+**NPM / bundler:**
 
 ```ts
 import { registerBackend } from 'zen-fs-config';
@@ -115,7 +182,15 @@ import { registerBackend } from 'zen-fs-config';
 registerBackend('Gitee', giteeFactory, giteeMetadata);
 ```
 
-The control reads the registered metadata to render the backend type selector and dynamic form fields.
+**Browser (no build):**
+
+When using the IIFE bundle, `registerBackend` is available on the global:
+
+```js
+ZenFSConfigUI.registerBackend('Gitee', factory, metadata);
+```
+
+The control reads the registered metadata to render the backend type selector and dynamic form fields. If no backends are registered, the form will have an empty type list.
 
 ## API
 
