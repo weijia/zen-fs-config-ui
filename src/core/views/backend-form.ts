@@ -78,6 +78,7 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
     accountBackendId: '' as string,
     importStr: '',
     importError: '',
+    submitError: '',
   };
 
   const initialMeta = metadataList.find((m) => m.type === type);
@@ -221,6 +222,11 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
     descGroup.appendChild(descInput);
     root.appendChild(descGroup);
 
+    // ── Submit error (inline, no alert) ────────────────────────────────
+    if (state.submitError) {
+      root.appendChild(el('div', { className: 'zfui-form-error' }, state.submitError));
+    }
+
     // ── Actions ────────────────────────────────────────────────────────
     const actions = el('div', { className: 'zfui-actions' });
     const cancelBtn = el('button', { className: 'zfui-btn' }, '取消');
@@ -228,8 +234,9 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
     actions.appendChild(cancelBtn);
     const submitBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '连接');
     on(submitBtn, 'click', async () => {
-      if (!state.id.trim()) { alert('请填写后端 ID'); return; }
-      if (!state.type) { alert('请选择后端类型'); return; }
+      state.submitError = '';
+      if (!state.id.trim()) { state.submitError = '请填写后端 ID'; render(); return; }
+      if (!state.type) { state.submitError = '请选择后端类型'; render(); return; }
       submitBtn.setAttribute('disabled', 'true');
       submitBtn.textContent = '连接中...';
       try {
@@ -241,9 +248,10 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
         });
         close();
       } catch (err) {
-        alert(err instanceof Error ? err.message : String(err));
+        state.submitError = err instanceof Error ? err.message : String(err);
         submitBtn.removeAttribute('disabled');
         submitBtn.textContent = '连接';
+        render();
       }
     });
     actions.appendChild(submitBtn);

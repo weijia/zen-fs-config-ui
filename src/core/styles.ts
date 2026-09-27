@@ -41,6 +41,8 @@ export const STYLES = `
 .zfui-btn-secondary:hover { background: #e5e7eb; }
 .zfui-btn-danger { color: #dc2626; border-color: #fecaca; }
 .zfui-btn-danger:hover { background: #fef2f2; }
+.zfui-btn-danger-active { background: #dc2626; color: #fff; border-color: #dc2626; }
+.zfui-btn-danger-active:hover { background: #b91c1c; }
 .zfui-btn-sm { padding: 3px 10px; font-size: 12px; }
 .zfui-btn:disabled { opacity: .5; cursor: not-allowed; }
 

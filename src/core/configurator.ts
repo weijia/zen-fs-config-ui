@@ -442,11 +442,12 @@ export class SyncGroupConfiguratorCore {
 
     const actions = el('div', { className: 'zfui-backend-item-actions' });
 
-    // Copy config string button
+    // Copy config string button (no prompt fallback — shows inline hint)
     const copyBtn = el('button', {
       className: 'zfui-btn zfui-btn-sm zfui-btn-secondary',
       title: '复制配置字符串',
     }, '📋');
+    let hintEl: HTMLElement | null = null;
     on(copyBtn, 'click', async () => {
       const str = serializeBackend(type, id, options, description);
       try {
@@ -454,16 +455,30 @@ export class SyncGroupConfiguratorCore {
         copyBtn.textContent = '✓';
         setTimeout(() => { copyBtn.textContent = '📋'; }, 1500);
       } catch {
-        // Fallback: show the string in an alert
-        prompt('复制以下配置字符串:', str);
+        // Fallback: show the string inline (no prompt)
+        if (!hintEl) {
+          hintEl = el('div', { className: 'zfui-copy-hint' }, str);
+          li.appendChild(hintEl);
+          setTimeout(() => { hintEl?.remove(); hintEl = null; }, 5000);
+        }
       }
     });
     actions.appendChild(copyBtn);
 
     if (removable) {
+      let confirming = false;
       const removeBtn = el('button', { className: 'zfui-btn zfui-btn-sm zfui-btn-danger' }, '删除');
       on(removeBtn, 'click', () => {
-        if (confirm(`确定删除后端 ${id} 吗？`)) {
+        if (!confirming) {
+          confirming = true;
+          removeBtn.textContent = '确定?';
+          removeBtn.classList.add('zfui-btn-danger-active');
+          setTimeout(() => {
+            confirming = false;
+            removeBtn.textContent = '删除';
+            removeBtn.classList.remove('zfui-btn-danger-active');
+          }, 3000);
+        } else {
           void this.handleRemoveBackend(id);
         }
       });
