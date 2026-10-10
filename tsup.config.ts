@@ -1,7 +1,39 @@
 import { defineConfig } from 'tsup';
+import type { Plugin } from 'esbuild';
 import pkg from './package.json';
 
 const VERSION = JSON.stringify(pkg.version);
+
+/**
+ * Stub Node.js built-in modules (`fs`/`path`/`os`/`crypto`/...) when bundling
+ * for the browser. zen-fs-config@0.5.x only dynamic-imports these inside its
+ * Folder backend and node-crypto paths, which are never reached in a browser,
+ * so replacing them with empty modules is safe and lets the IIFE build succeed.
+ */
+const nodeBuiltinsStub: Plugin = {
+  name: 'node-builtins-stub',
+  setup(build) {
+    const builtins = new Set([
+      'fs', 'path', 'os', 'crypto', 'stream', 'util', 'http', 'https',
+      'url', 'events', 'buffer', 'process',
+    ]);
+    build.onResolve({ filter: /.*/ }, (args) => {
+      let name = args.path;
+      if (name.startsWith('node:')) name = name.slice(5);
+      // Leave `buffer`/`process` to resolve normally — `buffer` maps to the
+      // installed npm polyfill and `process` is provided by platform=browser.
+      if (name === 'buffer' || name === 'process') return undefined;
+      if (!builtins.has(name)) return undefined;
+      return {
+        path: `stub:${name}`,
+        namespace: 'node-stub',
+      };
+    });
+    build.onLoad({ filter: /.*/, namespace: 'node-stub' }, () => {
+      return { contents: 'export default {}; export const sync = {};', loader: 'js' };
+    });
+  },
+};
 
 export default defineConfig([
   // ── npm build: CJS + ESM + d.ts ──────────────────────────────────────
@@ -29,6 +61,11 @@ export default defineConfig([
     platform: 'browser',
     target: 'es2020',
     noExternal: [/.*/],
+    // Stub Node builtins so their dynamic imports (Folder/Node paths) don't break
+    // the browser bundle — they are never reached in a browser environment.
+    // `buffer` (npm polyfill) and `process` (platform=browser shim) resolve normally.
+    alias: { buffer: 'buffer' },
+    esbuildPlugins: [nodeBuiltinsStub],
     splitting: false,
     clean: false,
     outExtension: () => ({ js: '.js' }),
