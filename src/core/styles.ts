@@ -102,6 +102,13 @@ export const STYLES = `
   background: #fff; margin-top: 12px;
 }
 .zfui-backend-item-actions { display: flex; gap: 4px; align-items: center; }
+.zfui-cfg-str {
+  display: block; width: 100%; box-sizing: border-box;
+  margin: 4px 0 2px; padding: 4px 6px; font-size: 11px; line-height: 1.4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #374151; background: #f3f4f6; border: 1px solid #e5e7eb;
+  border-radius: 4px;
+}
 .zfui-copy-hint {
   font-size: 11px; color: #6b7280; margin-top: 4px;
   font-family: monospace; word-break: break-all;

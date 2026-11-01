@@ -310,6 +310,11 @@ export class SyncGroupConfiguratorCore {
       this.emit('connected', {
         groupType: this.mode,
         backendId: backendInfo ? this.dataBackends[0]?.id ?? this.configBackends[0]?.id : undefined,
+        // Live object references for host apps (e.g. dir-struct-gen) to
+        // grab the data group's `fs` and manage the app's data-sync group.
+        repo: this.repo ?? undefined,
+        dataGroup: this.dataGroup ?? undefined,
+        backendInfo: backendInfo ?? this.props.backendInfo ?? undefined,
       });
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
@@ -362,14 +367,14 @@ export class SyncGroupConfiguratorCore {
       onSubmit: async (result) => {
         if (isDataGroup) {
           if (!this.repo) return;
-          await this.repo.createAppDataGroup(result.id, [{
+          const created = await this.repo.createAppDataGroup(result.id, [{
             id: result.id,
             type: result.type,
             options: result.options,
             description: result.description,
           }]);
           await this.loadDataGroups();
-          this.emit('data-group-created', { groupId: result.id });
+          this.emit('data-group-created', { groupId: result.id, dataGroup: created });
         } else if (this.mode === 'config-sync' && this.repo) {
           await addConfigBackend(this.repo, result.id, result.type, result.options, result.description);
           await this.loadConfigBackends();
@@ -643,20 +648,32 @@ export class SyncGroupConfiguratorCore {
 
     const actions = el('div', { className: 'zfui-backend-item-actions' });
 
+    const cfgStr = serializeBackend(type, id, options, description);
+
+    // 始终展示可分享的配置串（只读），方便手动复制 / 在另一端粘贴重连。
+    const strInput = el('input', {
+      className: 'zfui-cfg-str',
+      type: 'text',
+    }) as HTMLInputElement;
+    strInput.value = cfgStr;
+    strInput.readOnly = true;
+    strInput.spellcheck = false;
+    strInput.title = '配置字符串：可分享或在另一端粘贴以重连';
+    li.appendChild(strInput);
+
     const copyBtn = el('button', {
       className: 'zfui-btn zfui-btn-sm zfui-btn-secondary',
-      title: '复制配置字符串',
-    }, '📋');
+      title: '复制配置字符串（连接信息，可分享/重连）',
+    }, '📋 复制配置串');
     let hintEl: HTMLElement | null = null;
     on(copyBtn, 'click', async () => {
-      const str = serializeBackend(type, id, options, description);
       try {
-        await navigator.clipboard.writeText(str);
-        copyBtn.textContent = '✓';
-        setTimeout(() => { copyBtn.textContent = '📋'; }, 1500);
+        await navigator.clipboard.writeText(cfgStr);
+        copyBtn.textContent = '✓ 已复制';
+        setTimeout(() => { copyBtn.textContent = '📋 复制配置串'; }, 1500);
       } catch {
         if (!hintEl) {
-          hintEl = el('div', { className: 'zfui-copy-hint' }, str);
+          hintEl = el('div', { className: 'zfui-copy-hint' }, cfgStr);
           li.appendChild(hintEl);
           setTimeout(() => { hintEl?.remove(); hintEl = null; }, 5000);
         }

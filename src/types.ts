@@ -23,10 +23,21 @@ export type GroupMode = 'initial' | 'config-sync' | 'data-sync';
 
 /** Event callback map. */
 export interface CoreEventMap {
-  connected: { groupType: GroupMode; backendId?: string };
+  // `repo` (config-sync) / `dataGroup` (data-sync) / `backendInfo` carry the
+  // live object references so a host app can grab the data group's `fs` and
+  // programmatically manage the app's data-sync group (e.g. auto-create it
+  // with a RemoteStorage backend). They are plain object references (not
+  // cloned) because the event is dispatched in the same document.
+  connected: {
+    groupType: GroupMode;
+    backendId?: string;
+    repo?: unknown;
+    dataGroup?: unknown;
+    backendInfo?: BackendInfo;
+  };
   'backend-added': { backendId: string; type: string; groupType: GroupMode };
   'backend-removed': { backendId: string };
-  'data-group-created': { groupId: string };
+  'data-group-created': { groupId: string; dataGroup?: unknown };
   error: { message: string };
 }
 

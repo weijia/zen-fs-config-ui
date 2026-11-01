@@ -19,6 +19,10 @@ const TAG = 'sync-group-configurator';
 export class SyncGroupConfiguratorElement extends HTMLElement {
   private core: SyncGroupConfiguratorCore | null = null;
   private shadow: ShadowRoot;
+  /** Cached last `connected` payload so a host app can retrieve the live
+   *  repo / dataGroup / backendInfo even if it attached its listener after
+   *  the event already fired (e.g. background reconnect on page load). */
+  private lastConnected: unknown = null;
 
   static get observedAttributes(): string[] {
     return ['app-id', 'node-id', 'backend-type', 'backend-options'];
@@ -67,6 +71,7 @@ export class SyncGroupConfiguratorElement extends HTMLElement {
     const eventNames: CoreEventName[] = ['connected', 'backend-added', 'backend-removed', 'data-group-created', 'error'];
     for (const name of eventNames) {
       this.core.on(name, (data) => {
+        if (name === 'connected') this.lastConnected = data;
         this.dispatchEvent(new CustomEvent(name, { detail: data as CoreEventMap[typeof name], bubbles: true }));
       });
     }
@@ -77,6 +82,15 @@ export class SyncGroupConfiguratorElement extends HTMLElement {
   disconnectedCallback(): void {
     this.core?.destroy();
     this.core = null;
+  }
+
+  /**
+   * Returns the last `connected` payload (with live `repo` / `dataGroup` /
+   * `backendInfo` references), or `null` if not connected yet. Useful for a
+   * host app to obtain the data group's `fs` without racing the event.
+   */
+  getConnection(): unknown {
+    return this.lastConnected;
   }
 
   attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null): void {
