@@ -27,6 +27,10 @@ import {
   getDataGroups,
   addDataBackend,
   removeDataBackend,
+  createDataGroup,
+  removeAppDataGroupBackend,
+  addAppDataGroupBackend,
+  removeAppDataGroup,
   listDataBackends,
   getBackendMetadataList,
 } from './api.js';
@@ -63,7 +67,8 @@ export class SyncGroupConfiguratorCore {
   private styleEl: HTMLStyleElement | null = null;
   private showForm = false;
   private formContainer: HTMLElement | null = null;
-  private formKind: 'backend' | 'data-group' = 'backend';
+  private formKind: 'backend' | 'data-group' | 'data-group-backend' = 'backend';
+  private formTargetDataGroup: string | null = null;
 
   private listeners: Map<CoreEventName, Set<CoreEventListener>> = new Map();
 
@@ -356,14 +361,30 @@ export class SyncGroupConfiguratorCore {
     this.render();
   }
 
+  /** Add a remote backend to an existing data-sync group (config-sync view). */
+  async handleAddDataGroupBackend(): Promise<void> {
+    this.metadata = getBackendMetadataList().filter(
+      (m) => !LOCAL_BACKEND_TYPES.has(m.type),
+    );
+    this.formKind = 'data-group-backend';
+    this.showForm = true;
+    this.render();
+  }
+
   private openInlineForm(): void {
     if (!this.formContainer) return;
     const isDataGroup = this.formKind === 'data-group';
+    const isGroupBackend = this.formKind === 'data-group-backend';
+    const formTitle = isDataGroup
+      ? '新增数据同步组'
+      : isGroupBackend
+        ? `添加后端到 ${this.formTargetDataGroup ?? ''}`
+        : '添加后端';
     openBackendForm({
       metadataList: this.metadata,
       container: this.formContainer,
       mode: 'inline',
-      title: isDataGroup ? '新增数据同步组' : '添加后端',
+      title: formTitle,
       onSubmit: async (result) => {
         if (isDataGroup) {
           if (!this.repo) return;
@@ -375,6 +396,10 @@ export class SyncGroupConfiguratorCore {
           }]);
           await this.loadDataGroups();
           this.emit('data-group-created', { groupId: result.id, dataGroup: created });
+        } else if (isGroupBackend && this.repo && this.formTargetDataGroup) {
+          await addAppDataGroupBackend(this.repo, this.formTargetDataGroup, result.id, result.type, result.options, result.description);
+          await this.loadDataGroups();
+          this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'data-sync' });
         } else if (this.mode === 'config-sync' && this.repo) {
           await addConfigBackend(this.repo, result.id, result.type, result.options, result.description);
           await this.loadConfigBackends();
@@ -431,6 +456,48 @@ export class SyncGroupConfiguratorCore {
       this.emit('backend-removed', { backendId: id });
       this.render();
     } catch (err) {
+      this.error = err instanceof Error ? err.message : String(err);
+      this.render();
+    }
+  }
+
+  /** Remove a backend from a data-sync group while in config-sync overview. */
+  private async handleRemoveDataGroupBackend(groupId: string, backendId: string): Promise<void> {
+    try {
+      if (!this.repo) return;
+      console.log('[zenfs-config-ui] remove data-group backend:', groupId, backendId);
+      const dgs = await getDataGroups(this.repo);
+      const dg = dgs.find((d) => d.id === groupId);
+      if (!dg) {
+        this.error = `数据同步组 ${groupId} 不存在`;
+        this.render();
+        return;
+      }
+      // Operate on the descriptor directly instead of re-instantiating the
+      // group. Re-instantiating then calling removeBackend() fails when the
+      // backend cannot be re-created (init() skips failed backends, so
+      // removeBackend() throws "Backend not found").
+      await removeAppDataGroupBackend(this.repo, groupId, backendId);
+      console.log('[zenfs-config-ui] descriptor updated, backends now:', dg.backends.filter(b => b.id !== backendId).map(b => b.id));
+      await this.loadDataGroups();
+      this.render();
+    } catch (err) {
+      console.error('[zenfs-config-ui] remove data-group backend FAILED:', err);
+      this.error = err instanceof Error ? err.message : String(err);
+      this.render();
+    }
+  }
+
+  /** Delete an entire data-sync group (dispose instance + remove descriptor). */
+  private async handleRemoveDataGroup(groupId: string): Promise<void> {
+    try {
+      if (!this.repo) return;
+      console.log('[zenfs-config-ui] remove data-group:', groupId);
+      await removeAppDataGroup(this.repo, groupId);
+      await this.loadDataGroups();
+      this.render();
+    } catch (err) {
+      console.error('[zenfs-config-ui] remove data-group FAILED:', err);
       this.error = err instanceof Error ? err.message : String(err);
       this.render();
     }
@@ -569,10 +636,42 @@ export class SyncGroupConfiguratorCore {
       for (const dg of this.dataGroups) {
         const card = el('div', { className: 'zfui-data-group' });
         card.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.id));
-        for (const b of dg.backends) {
-          card.appendChild(el('div', { style: 'font-size:12px;color:#6b7280;padding:2px 0' },
-            `${b.id} (${b.type})`));
+        const dgList = el('ul', { className: 'zfui-backend-list' });
+        if (dg.backends.length === 0) {
+          dgList.appendChild(el('li', { className: 'zfui-backend-item', style: 'color:#9ca3af;font-size:12px' }, '（无后端）'));
+        } else {
+          for (const b of dg.backends) {
+            // 每个后端显示只读配置串 + 📋复制配置串；removable=true 提供删除按钮，
+            // 删除回调绑定所属数据组 id，删除的是数据组内的后端（非配置后端）。
+            dgList.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true, () => void this.handleRemoveDataGroupBackend(dg.id, b.id)));
+          }
         }
+        card.appendChild(dgList);
+        // Let users add more remote backends to this specific data group.
+        const addDgBackendBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 添加后端');
+        on(addDgBackendBtn, 'click', () => {
+          this.formTargetDataGroup = dg.id;
+          void this.handleAddDataGroupBackend();
+        });
+        card.appendChild(addDgBackendBtn);
+        // Delete the whole data group (dispose instance + remove descriptor).
+        const removeGroupBtn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '🗑 删除组');
+        let confirmingGroup = false;
+        on(removeGroupBtn, 'click', () => {
+          if (confirmingGroup) {
+            confirmingGroup = false;
+            removeGroupBtn.textContent = '🗑 删除组';
+            void this.handleRemoveDataGroup(dg.id);
+          } else {
+            confirmingGroup = true;
+            removeGroupBtn.textContent = '确定?';
+            window.setTimeout(() => {
+              confirmingGroup = false;
+              removeGroupBtn.textContent = '🗑 删除组';
+            }, 3000);
+          }
+        });
+        card.appendChild(removeGroupBtn);
         dgSection.appendChild(card);
       }
     }
@@ -632,6 +731,7 @@ export class SyncGroupConfiguratorCore {
     options: Record<string, unknown>,
     description: string | undefined,
     removable: boolean,
+    onRemove?: (id: string) => void,
   ): HTMLElement {
     const meta = this.metadata.find(m => m.type === type);
     const label = meta ? `${meta.icon} ${meta.label}` : type;
@@ -695,7 +795,8 @@ export class SyncGroupConfiguratorCore {
             removeBtn.classList.remove('zfui-btn-danger-active');
           }, 3000);
         } else {
-          void this.handleRemoveBackend(id);
+          if (onRemove) onRemove(id);
+          else void this.handleRemoveBackend(id);
         }
       });
       actions.appendChild(removeBtn);
