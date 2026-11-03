@@ -126,4 +126,16 @@ export const STYLES = `
   margin-bottom: 10px; background: #f9fafb;
 }
 .zfui-data-group-name { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.zfui-status-line {
+  font-size: 11px; color: #4b5563; line-height: 1.7; margin: 6px 0 4px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.zfui-status-line.err { color: #b91c1c; }
+.zfui-status-refresh {
+  padding: 2px 10px; font-size: 11px; cursor: pointer;
+  background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 4px;
+  color: #374151; flex-shrink: 0;
+}
+.zfui-status-refresh:hover { background: #e5e7eb; }
+.zfui-status-detail { font-size: 11px; color: #6b7280; line-height: 1.7; }
 `;

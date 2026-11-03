@@ -9,6 +9,7 @@ import type {
   AppDataGroup,
   BackendDescriptor,
   AppDataGroupDescriptor,
+  SyncPairStatus,
 } from 'zen-fs-config';
 import type {
   CoreProps,
@@ -49,6 +50,77 @@ const LOCAL_BACKEND_TYPES = new Set(['IndexedDB', 'InMemory']);
 
 const STORAGE_KEY = 'zenfs-config-ui:backend';
 
+/** How often the per-group status lines are re-read from the live group. */
+const STATUS_REFRESH_MS = 2000;
+
+/** Format a timestamp as `hh:mm:ss` (local time, 24h). */
+function fmtClock(ts?: number): string {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
+  } catch {
+    return '—';
+  }
+}
+
+/**
+ * Aggregate a group's sync-pair statuses into one compact line:
+ * `同步对 N · 空闲/同步中 · 最近检查 hh:mm:ss · 累计 K 次 · 上轮 +a ~b -c skip:d · 冲突 n`.
+ *
+ * `lastError` is returned separately so the main line stays stable; it is a
+ * sticky per-pair record (zen-fs-sync >= 0.4.17) and is not cleared by a
+ * clean sync.
+ */
+function formatSyncStatuses(statuses: Map<string, SyncPairStatus>): {
+  text: string;
+  error?: { message: string; timestamp: number };
+} {
+  if (statuses.size === 0) {
+    return { text: '同步对 0 · 无可用远端后端（仅本地）' };
+  }
+  let syncing = false;
+  let lastCheck = 0;
+  let totalSyncs = 0;
+  let created = 0;
+  let updated = 0;
+  let deleted = 0;
+  let skipped = 0;
+  let conflicts = 0;
+  let lastError: { message: string; timestamp: number } | undefined;
+  for (const st of statuses.values()) {
+    if (String(st.state) === 'syncing') syncing = true;
+    if (st.lastCheckTime) lastCheck = Math.max(lastCheck, st.lastCheckTime);
+    totalSyncs += st.totalSyncs || 0;
+    const r = st.lastResult;
+    if (r) {
+      lastCheck = Math.max(lastCheck, r.timestamp || 0);
+      created += r.filesCreated || 0;
+      updated += r.filesUpdated || 0;
+      deleted += r.filesDeleted || 0;
+      skipped += r.filesSkipped || 0;
+      conflicts += (r.conflicts || []).length;
+    }
+    if (st.lastError) lastError = st.lastError;
+  }
+  const text = [
+    `同步对 ${statuses.size}`,
+    syncing ? '同步中' : '空闲',
+    `最近检查 ${fmtClock(lastCheck)}`,
+    `累计 ${totalSyncs} 次`,
+    `上轮 +${created} ~${updated} -${deleted} skip:${skipped}`,
+    `冲突 ${conflicts}`,
+  ].join(' · ');
+  return { text, error: lastError };
+}
+
+interface StatusRowRef {
+  textEl: HTMLElement;
+  detailEl: HTMLElement;
+  read: () => Map<string, SyncPairStatus> | null;
+  /** Set when the group has no live instance in this session. */
+  unavailable?: string;
+}
+
 export class SyncGroupConfiguratorCore {
   private container: HTMLElement;
   private props: CoreProps;
@@ -65,6 +137,15 @@ export class SyncGroupConfiguratorCore {
   private configBackends: BackendDescriptor[] = [];
   private dataGroups: AppDataGroupDescriptor[] = [];
   private dataBackends: BackendDescriptor[] = [];
+  /**
+   * Live data-group instances loaded by `connect()` (keyed by group id). Only
+   * these can report real sync status; a descriptor without an entry is shown
+   * as「未连接」— the UI never instantiates a group just to render a status.
+   */
+  private groupInstances: Map<string, AppDataGroup> = new Map();
+  private groupUnavailable: Map<string, string> = new Map();
+  private statusRefs: StatusRowRef[] = [];
+  private statusTimer: number | null = null;
   /** Legacy `app-data` group created by older dir-struct-gen versions. */
   private legacyAppData: LegacyAppDataGroupMatch | null = null;
 
@@ -269,6 +350,7 @@ export class SyncGroupConfiguratorCore {
 
   destroy(): void {
     this.destroyed = true;
+    this.stopStatusTimer();
     clear(this.container);
     if (this.styleEl) this.styleEl.remove();
     this.listeners.clear();
@@ -302,6 +384,18 @@ export class SyncGroupConfiguratorCore {
 
     try {
       const result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId);
+
+      // Capture the live group instances that connect() already loaded. The UI
+      // never instantiates a group on its own — missing groups render as
+      //「未连接」with the actual reason instead of fabricated numbers.
+      this.groupInstances = new Map();
+      this.groupUnavailable = new Map();
+      for (const g of result.appDataGroups ?? []) {
+        if (g) this.groupInstances.set(g.groupId, g);
+      }
+      if (result.dataGroup) {
+        this.groupInstances.set(result.dataGroup.groupId, result.dataGroup);
+      }
 
       if (result.repo) {
         this.repo = result.repo;
@@ -353,6 +447,21 @@ export class SyncGroupConfiguratorCore {
     } catch {
       this.dataGroups = [];
     }
+    // Reconcile live instances with descriptors. Descriptors without a live
+    // instance are reported as 未连接 (no stats) — never silently created here.
+    const ids = new Set(this.dataGroups.map((d) => d.id));
+    for (const id of [...this.groupInstances.keys()]) {
+      if (!ids.has(id)) this.groupInstances.delete(id);
+    }
+    this.groupUnavailable = new Map();
+    for (const d of this.dataGroups) {
+      if (!this.groupInstances.has(d.id)) {
+        this.groupUnavailable.set(
+          d.id,
+          '该组未在当前会话实例化（连接时加载失败或仅存在于描述符中），暂无实时状态',
+        );
+      }
+    }
     this.legacyAppData = detectLegacyAppDataGroup(this.dataGroups);
   }
 
@@ -385,6 +494,7 @@ export class SyncGroupConfiguratorCore {
         let migratedGroup: AppDataGroup | undefined;
         try {
           migratedGroup = await this.repo.getAppDataGroup(result.targetGroupId);
+          if (migratedGroup) this.groupInstances.set(migratedGroup.groupId, migratedGroup);
         } catch {
           migratedGroup = undefined;
         }
@@ -447,6 +557,7 @@ export class SyncGroupConfiguratorCore {
             options: result.options,
             description: result.description,
           }]);
+          this.groupInstances.set(created.groupId, created);
           await this.loadDataGroups();
           this.emit('data-group-created', { groupId: result.id, dataGroup: created });
         } else if (isGroupBackend && this.repo && this.formTargetDataGroup) {
@@ -547,6 +658,8 @@ export class SyncGroupConfiguratorCore {
       if (!this.repo) return;
       console.log('[zenfs-config-ui] remove data-group:', groupId);
       await removeAppDataGroup(this.repo, groupId);
+      this.groupInstances.delete(groupId);
+      this.groupUnavailable.delete(groupId);
       await this.loadDataGroups();
       this.render();
     } catch (err) {
@@ -581,6 +694,8 @@ export class SyncGroupConfiguratorCore {
 
   render(): void {
     if (this.destroyed) return;
+    // Rows from the previous render point at detached nodes; rebuild them.
+    this.statusRefs = [];
     clear(this.container);
 
     if (this.connecting) {
@@ -633,6 +748,9 @@ export class SyncGroupConfiguratorCore {
     } else {
       this.formContainer = null;
     }
+
+    this.updateStatusRows();
+    this.ensureStatusTimer();
   }
 
   private getSubtitle(): string {
@@ -667,6 +785,11 @@ export class SyncGroupConfiguratorCore {
 
     const syncSection = el('div', { className: 'zfui-section' });
     syncSection.appendChild(el('div', { className: 'zfui-section-title' }, '🔧 同步后端'));
+    // Config-sync group's own status: repo.getSyncStatuses() covers its
+    // replica pairs (local primary ↔ each config backend).
+    syncSection.appendChild(this.buildStatusRow(
+      () => (this.repo ? this.repo.getSyncStatuses() : null),
+    ));
 
     const list = el('ul', { className: 'zfui-backend-list' });
     list.appendChild(this.buildLocalBackendItem());
@@ -718,6 +841,15 @@ export class SyncGroupConfiguratorCore {
       for (const dg of this.dataGroups) {
         const card = el('div', { className: 'zfui-data-group' });
         card.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.id));
+        // Each data-group card reads its OWN live instance's status, so two
+        // groups never share numbers (their sync engines are separate).
+        card.appendChild(this.buildStatusRow(
+          () => {
+            const live = this.groupInstances.get(dg.id);
+            return live ? live.getSyncStatuses() : null;
+          },
+          this.groupInstances.has(dg.id) ? undefined : this.groupUnavailable.get(dg.id),
+        ));
         const dgList = el('ul', { className: 'zfui-backend-list' });
         if (dg.backends.length === 0) {
           dgList.appendChild(el('li', { className: 'zfui-backend-item', style: 'color:#9ca3af;font-size:12px' }, '（无后端）'));
@@ -769,6 +901,10 @@ export class SyncGroupConfiguratorCore {
   private buildDataSyncView(): HTMLElement {
     const section = el('div', { className: 'zfui-section' });
     section.appendChild(el('div', { className: 'zfui-section-title' }, '🔗 同步后端'));
+    // Standalone data-sync group: its own sync engine's status.
+    section.appendChild(this.buildStatusRow(
+      () => (this.dataGroup ? this.dataGroup.getSyncStatuses() : null),
+    ));
 
     const list = el('ul', { className: 'zfui-backend-list' });
     list.appendChild(this.buildLocalBackendItem());
@@ -782,6 +918,82 @@ export class SyncGroupConfiguratorCore {
     section.appendChild(addBtn);
 
     return section;
+  }
+
+  // ── Per-group sync status ────────────────────────────────────────────
+
+  /**
+   * Build a status row bound to one group. `read` is called repeatedly (timer
+   * + manual refresh) and must never instantiate a group — it only reads from
+   * an already-live instance, or returns null when there is none.
+   */
+  private buildStatusRow(
+    read: () => Map<string, SyncPairStatus> | null,
+    unavailable?: string,
+  ): HTMLElement {
+    const wrap = el('div', { className: 'zfui-status-block' });
+    const line = el('div', { className: 'zfui-status-line' });
+    const textEl = el('span', {}, '读取同步状态…');
+    const refreshBtn = el('button', {
+      className: 'zfui-status-refresh',
+      type: 'button',
+      title: '重新读取本组同步状态（不会触发同步）',
+    }, '↻ 刷新状态');
+    on(refreshBtn, 'click', () => this.updateStatusRows());
+    line.appendChild(textEl);
+    line.appendChild(refreshBtn);
+    const detailEl = el('div', { className: 'zfui-status-detail' });
+    wrap.appendChild(line);
+    wrap.appendChild(detailEl);
+    this.statusRefs.push({ textEl, detailEl, read, unavailable });
+    return wrap;
+  }
+
+  /** Refresh all visible status rows from their live group instances. */
+  private updateStatusRows(): void {
+    if (this.destroyed) return;
+    for (const ref of this.statusRefs) {
+      if (ref.unavailable) {
+        ref.textEl.textContent = `未连接 · ${ref.unavailable}`;
+        ref.textEl.parentElement?.classList.add('err');
+        ref.detailEl.textContent = '';
+        continue;
+      }
+      let statuses: Map<string, SyncPairStatus> | null = null;
+      try {
+        statuses = ref.read();
+      } catch (err) {
+        ref.textEl.textContent = '同步状态读取失败 · '
+          + (err instanceof Error ? err.message : String(err));
+        ref.textEl.parentElement?.classList.add('err');
+        ref.detailEl.textContent = '';
+        continue;
+      }
+      if (!statuses) {
+        ref.textEl.textContent = '未连接 · 该组没有当前会话的实例，暂无实时状态';
+        ref.textEl.parentElement?.classList.add('err');
+        ref.detailEl.textContent = '';
+        continue;
+      }
+      ref.textEl.parentElement?.classList.remove('err');
+      const { text, error } = formatSyncStatuses(statuses);
+      ref.textEl.textContent = text;
+      ref.detailEl.textContent = error
+        ? `最后错误 ${fmtClock(error.timestamp)} · ${String(error.message).slice(0, 120)}`
+        : '';
+    }
+  }
+
+  private ensureStatusTimer(): void {
+    if (this.statusTimer !== null || this.destroyed || this.statusRefs.length === 0) return;
+    this.statusTimer = window.setInterval(() => this.updateStatusRows(), STATUS_REFRESH_MS);
+  }
+
+  private stopStatusTimer(): void {
+    if (this.statusTimer !== null) {
+      window.clearInterval(this.statusTimer);
+      this.statusTimer = null;
+    }
   }
 
   private buildErrorView(): HTMLElement {
