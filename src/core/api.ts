@@ -32,6 +32,7 @@ export interface ApiBackendDescriptor {
  */
 export interface RepoWithAppDataGroups extends IConfigRepo {
   listAppDataGroups(): Promise<AppDataGroupDescriptor[]>;
+  getAppDataGroup(id: string): Promise<AppDataGroup>;
   updateAppDataGroupDescriptor(id: string, backends: AppDataBackendDescriptor[]): Promise<void>;
   removeAppDataGroup(id: string): Promise<void>;
 }
@@ -207,8 +208,10 @@ export function detectLegacyAppDataGroup(
  *
  * 1. Ensure the `default` group exists (created without backends so no remote
  *    connection is attempted).
- * 2. Copy the `rs-app` RemoteStorage backend descriptor into `default` so
- *    uploads keep working even if `app-data` was the only group.
+ * 2. Attach the `rs-app` RemoteStorage backend to the live `default` group
+ *    instance (`addBackend`), so uploads keep working in the current session
+ *    even if `app-data` was the only group — a descriptor-only copy would
+ *    leave the instantiated group without its remote target until reload.
  * 3. Remove only the `app-data` descriptor; remote files stay untouched.
  *
  * After this, detection returns null, so the UI stops prompting on every
@@ -222,18 +225,18 @@ export async function migrateLegacyAppDataGroup(
   if (!found) return { migrated: false, targetGroupId: '' };
 
   const targetId = 'default';
-  const target = groups.find((g) => g.id === targetId);
-  if (!target) {
+  if (!groups.some((g) => g.id === targetId)) {
     // Empty group first: avoids instantiating the remote backend during
     // creation, which may fail when the remote is temporarily unreachable.
     await repo.createAppDataGroup(targetId, []);
-    await (repo as RepoWithAppDataGroups).updateAppDataGroupDescriptor(targetId, [
-      { ...found.backend, createdAt: found.backend.createdAt ?? Date.now() },
-    ]);
-  } else if (!target.backends.some((b) => b.id === found.backend.id)) {
-    await addAppDataGroupBackend(
-      repo,
-      targetId,
+  }
+
+  // Attach through the live group instance: `addBackend` persists the
+  // descriptor itself and wires the remote sync pair immediately, so the host
+  // app can keep uploading without a reload.
+  const targetGroup = await (repo as RepoWithAppDataGroups).getAppDataGroup(targetId);
+  if (!targetGroup.listBackends().some((b) => b.id === found.backend.id)) {
+    await targetGroup.addBackend(
       found.backend.id,
       found.backend.type,
       found.backend.options,

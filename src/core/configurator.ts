@@ -380,6 +380,20 @@ export class SyncGroupConfiguratorCore {
         console.log(
           `[zenfs-config-ui] legacy app-data group migrated to "${result.targetGroupId}" (remote files untouched)`,
         );
+        // The host app may still hold the removed group's `fs`; re-emit the
+        // connection so it can swap to the migrated group immediately.
+        let migratedGroup: AppDataGroup | undefined;
+        try {
+          migratedGroup = await this.repo.getAppDataGroup(result.targetGroupId);
+        } catch {
+          migratedGroup = undefined;
+        }
+        this.emit('connected', {
+          groupType: this.mode,
+          repo: this.repo,
+          dataGroup: migratedGroup,
+          backendInfo: this.props.backendInfo,
+        });
       }
       this.render();
     } catch (err) {
