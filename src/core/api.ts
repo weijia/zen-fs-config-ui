@@ -14,6 +14,7 @@ import type {
 import {
   connect,
   listBackendMetadata,
+  LOCAL_IDB_BACKEND_ID,
   type BackendMetadata,
 } from 'zen-fs-config';
 import type { BackendInfo } from '../types.js';
@@ -69,7 +70,11 @@ export function getBackendMetadataList(): BackendMetadata[] {
  */
 export async function getConfigBackends(repo: IConfigRepo): Promise<BackendDescriptor[]> {
   const meta = await repo.getBackends();
-  return meta?.backends ?? [];
+  // zen-fs-config prepends the implicit local primary (`local-idb`) to the
+  // descriptor list, but it is the sync *source* and never a removable
+  // backend. The card renders it once as a read-only "隐式 source" row, so
+  // drop it here to avoid a second, deletable duplicate entry.
+  return (meta?.backends ?? []).filter((b) => b.id !== LOCAL_IDB_BACKEND_ID);
 }
 
 /**

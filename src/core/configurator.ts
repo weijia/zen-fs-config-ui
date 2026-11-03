@@ -11,6 +11,7 @@ import type {
   AppDataGroupDescriptor,
   SyncPairStatus,
 } from 'zen-fs-config';
+import { localPrimaryType } from 'zen-fs-config';
 import type {
   CoreProps,
   GroupMode,
@@ -65,7 +66,7 @@ function fmtClock(ts?: number): string {
 
 /**
  * Aggregate a group's sync-pair statuses into one compact line:
- * `同步对 N · 空闲/同步中 · 最近检查 hh:mm:ss · 累计 K 次 · 上轮 +a ~b -c skip:d · 冲突 n`.
+ * `同步对 N（监听 M） · 空闲/同步中 · 最近检查 hh:mm:ss · 累计 K 次 · 上轮 +a ~b -c skip:d · 冲突 n`.
  *
  * `lastError` is returned separately so the main line stays stable; it is a
  * sticky per-pair record (zen-fs-sync >= 0.4.17) and is not cleared by a
@@ -79,6 +80,7 @@ function formatSyncStatuses(statuses: Map<string, SyncPairStatus>): {
     return { text: '同步对 0 · 无可用远端后端（仅本地）' };
   }
   let syncing = false;
+  let watching = 0;
   let lastCheck = 0;
   let totalSyncs = 0;
   let created = 0;
@@ -89,6 +91,7 @@ function formatSyncStatuses(statuses: Map<string, SyncPairStatus>): {
   let lastError: { message: string; timestamp: number } | undefined;
   for (const st of statuses.values()) {
     if (String(st.state) === 'syncing') syncing = true;
+    if (st.watching) watching += 1;
     if (st.lastCheckTime) lastCheck = Math.max(lastCheck, st.lastCheckTime);
     totalSyncs += st.totalSyncs || 0;
     const r = st.lastResult;
@@ -103,7 +106,7 @@ function formatSyncStatuses(statuses: Map<string, SyncPairStatus>): {
     if (st.lastError) lastError = st.lastError;
   }
   const text = [
-    `同步对 ${statuses.size}`,
+    `同步对 ${statuses.size}（监听 ${watching}）`,
     syncing ? '同步中' : '空闲',
     `最近检查 ${fmtClock(lastCheck)}`,
     `累计 ${totalSyncs} 次`,
@@ -1013,8 +1016,8 @@ export class SyncGroupConfiguratorCore {
     const li = el('li', { className: 'zfui-backend-item zfui-backend-item-primary' });
     li.appendChild(el('div', {}, [
       el('span', { className: 'zfui-backend-name' }, 'local-idb'),
-      el('span', { className: 'zfui-backend-type' }, 'IndexedDB'),
-      el('span', { className: 'zfui-badge zfui-badge-primary', style: 'margin-left:8px' }, '本地主后端'),
+      el('span', { className: 'zfui-backend-type' }, localPrimaryType()),
+      el('span', { className: 'zfui-badge zfui-badge-primary', style: 'margin-left:8px' }, '隐式 source · 不参与同步'),
     ]));
     return li;
   }
