@@ -175,6 +175,76 @@ export async function createDataGroup(
   return repo.createAppDataGroup(id, backends);
 }
 
+// ── Legacy `app-data` group migration ────────────────────────────────
+
+export interface LegacyAppDataGroupMatch {
+  groupId: string;
+  backend: AppDataBackendDescriptor;
+}
+
+/**
+ * Detect the data group that older dir-struct-gen versions created
+ * automatically: id `app-data` with a RemoteStorage backend `rs-app`.
+ *
+ * Newer versions never create it, but the descriptor was persisted in the
+ * config-sync repo (local IndexedDB and/or remote `.meta/app-data-groups/`),
+ * so it keeps showing up on every session. Detection is pure so it can be
+ * unit-tested without a repo.
+ */
+export function detectLegacyAppDataGroup(
+  groups: AppDataGroupDescriptor[],
+): LegacyAppDataGroupMatch | null {
+  const group = groups.find((g) => g.id === 'app-data');
+  if (!group) return null;
+  const backend = group.backends.find(
+    (b) => b.id === 'rs-app' && b.type === 'RemoteStorage',
+  );
+  return backend ? { groupId: group.id, backend } : null;
+}
+
+/**
+ * Explicit, non-destructive migration of the legacy group:
+ *
+ * 1. Ensure the `default` group exists (created without backends so no remote
+ *    connection is attempted).
+ * 2. Copy the `rs-app` RemoteStorage backend descriptor into `default` so
+ *    uploads keep working even if `app-data` was the only group.
+ * 3. Remove only the `app-data` descriptor; remote files stay untouched.
+ *
+ * After this, detection returns null, so the UI stops prompting on every
+ * subsequent startup. Only call this from an explicit user action.
+ */
+export async function migrateLegacyAppDataGroup(
+  repo: IConfigRepo,
+): Promise<{ migrated: boolean; targetGroupId: string }> {
+  const groups = await repo.listAppDataGroups();
+  const found = detectLegacyAppDataGroup(groups);
+  if (!found) return { migrated: false, targetGroupId: '' };
+
+  const targetId = 'default';
+  const target = groups.find((g) => g.id === targetId);
+  if (!target) {
+    // Empty group first: avoids instantiating the remote backend during
+    // creation, which may fail when the remote is temporarily unreachable.
+    await repo.createAppDataGroup(targetId, []);
+    await (repo as RepoWithAppDataGroups).updateAppDataGroupDescriptor(targetId, [
+      { ...found.backend, createdAt: found.backend.createdAt ?? Date.now() },
+    ]);
+  } else if (!target.backends.some((b) => b.id === found.backend.id)) {
+    await addAppDataGroupBackend(
+      repo,
+      targetId,
+      found.backend.id,
+      found.backend.type,
+      found.backend.options,
+      found.backend.description,
+    );
+  }
+
+  await removeAppDataGroup(repo, 'app-data');
+  return { migrated: true, targetGroupId: targetId };
+}
+
 /**
  * Add a backend to a standalone data-sync group.
  */

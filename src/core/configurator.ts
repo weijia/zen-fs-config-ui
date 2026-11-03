@@ -33,6 +33,9 @@ import {
   removeAppDataGroup,
   listDataBackends,
   getBackendMetadataList,
+  detectLegacyAppDataGroup,
+  migrateLegacyAppDataGroup,
+  type LegacyAppDataGroupMatch,
 } from './api.js';
 import { el, on, clear } from './render.js';
 import { STYLES } from './styles.js';
@@ -62,6 +65,8 @@ export class SyncGroupConfiguratorCore {
   private configBackends: BackendDescriptor[] = [];
   private dataGroups: AppDataGroupDescriptor[] = [];
   private dataBackends: BackendDescriptor[] = [];
+  /** Legacy `app-data` group created by older dir-struct-gen versions. */
+  private legacyAppData: LegacyAppDataGroupMatch | null = null;
 
   private metadata: BackendMetadata[] = [];
   private styleEl: HTMLStyleElement | null = null;
@@ -348,6 +353,40 @@ export class SyncGroupConfiguratorCore {
     } catch {
       this.dataGroups = [];
     }
+    this.legacyAppData = detectLegacyAppDataGroup(this.dataGroups);
+  }
+
+  /**
+   * Explicit, user-triggered migration of the legacy `app-data` group.
+   * Copies its RemoteStorage backend into `default`, then removes only the
+   * `app-data` descriptor. Remote files are not deleted.
+   */
+  private async handleMigrateLegacyAppData(): Promise<void> {
+    if (!this.repo || !this.legacyAppData) return;
+    try {
+      // Keep a local backup of the descriptor for manual recovery.
+      try {
+        localStorage.setItem(
+          'zenfs-config-ui:legacy-app-data-backup',
+          JSON.stringify({ at: Date.now(), match: this.legacyAppData }),
+        );
+      } catch {
+        // storage may be unavailable; migration itself is still safe
+      }
+      const result = await migrateLegacyAppDataGroup(this.repo);
+      await this.loadDataGroups();
+      if (result.migrated) {
+        this.error = null;
+        console.log(
+          `[zenfs-config-ui] legacy app-data group migrated to "${result.targetGroupId}" (remote files untouched)`,
+        );
+      }
+      this.render();
+    } catch (err) {
+      this.error = `清理旧版 app-data 组失败: ${err instanceof Error ? err.message : String(err)}`;
+      console.error('[zenfs-config-ui] migrate legacy app-data FAILED:', err);
+      this.render();
+    }
   }
 
   // ── Actions ──────────────────────────────────────────────────────────
@@ -626,6 +665,35 @@ export class SyncGroupConfiguratorCore {
     on(addBtn, 'click', () => { void this.handleAddBackend(); });
     syncSection.appendChild(addBtn);
     frag.appendChild(syncSection);
+
+    if (this.legacyAppData) {
+      const legacySection = el('div', {
+        className: 'zfui-section',
+        style: 'border:1px solid #f59e0b;background:#fffbeb;padding:12px;',
+      });
+      legacySection.appendChild(el('div', { className: 'zfui-section-title' }, '⚠️ 检测到旧版遗留数据组'));
+      legacySection.appendChild(el('div', {
+        style: 'font-size:12px;color:#92400e;line-height:1.6;margin-bottom:8px',
+      }, '旧版 dir-struct-gen 自动创建的 app-data 组（后端 rs-app）仍保存在配置里。可将其后端迁移到 default 组后删除该组；只删除本地描述符，不会删除远端 app_data/folders 中的文件，上传仍可继续。'));
+      const migrateBtn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '迁移并清理');
+      let confirming = false;
+      on(migrateBtn, 'click', () => {
+        if (confirming) {
+          confirming = false;
+          migrateBtn.textContent = '迁移并清理';
+          void this.handleMigrateLegacyAppData();
+        } else {
+          confirming = true;
+          migrateBtn.textContent = '确定迁移?';
+          window.setTimeout(() => {
+            confirming = false;
+            migrateBtn.textContent = '迁移并清理';
+          }, 3000);
+        }
+      });
+      legacySection.appendChild(migrateBtn);
+      frag.appendChild(legacySection);
+    }
 
     const dgSection = el('div', { className: 'zfui-section' });
     dgSection.appendChild(el('div', { className: 'zfui-section-title' }, '📦 数据同步组'));
