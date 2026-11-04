@@ -20,8 +20,10 @@ const metadata = [gitee];
 
 describe('config-string deserializeBackend', () => {
   it('splits the trailing :desc= segment from the last option', () => {
+    // Token redacted on purpose: never persist real credentials in fixtures.
+    const token = 'e43a0000000000000000000000000000';
     const parsed = deserializeBackend(
-      'Gitee:gitee:owner=weijia432,repo=folders,branch=master,token=e43a392a87e6270e8d866b6cea8e3e2d:desc=Gitee 仓库',
+      `Gitee:gitee:owner=weijia432,repo=folders,branch=master,token=${token}:desc=Gitee 仓库`,
       metadata,
     );
     expect(parsed).not.toBeNull();
@@ -30,7 +32,7 @@ describe('config-string deserializeBackend', () => {
     expect(parsed!.options.owner).toBe('weijia432');
     expect(parsed!.options.repo).toBe('folders');
     expect(parsed!.options.branch).toBe('master');
-    expect(parsed!.options.token).toBe('e43a392a87e6270e8d866b6cea8e3e2d');
+    expect(parsed!.options.token).toBe(token);
     expect(parsed!.description).toBe('Gitee 仓库');
   });
 
@@ -57,7 +59,7 @@ describe('config-string deserializeBackend', () => {
 
   it('round-trips through serializeBackend', () => {
     const original =
-      'Gitee:gitee:owner=weijia432,repo=folders,branch=master,token=e43a392a87e6270e8d866b6cea8e3e2d:desc=Gitee 仓库';
+      'Gitee:gitee:owner=weijia432,repo=folders,branch=master,token=e43a0000000000000000000000000000:desc=Gitee 仓库';
     const parsed = deserializeBackend(original, metadata)!;
     const serialized = serializeBackend(parsed.type, parsed.id, parsed.options, parsed.description);
     expect(serialized).toBe(original);
