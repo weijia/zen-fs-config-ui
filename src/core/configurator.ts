@@ -37,8 +37,14 @@ import {
   getBackendMetadataList,
   detectLegacyAppDataGroup,
   migrateLegacyAppDataGroup,
+  getConfigGroupDescriptor,
+  updateConfigGroupName,
+  updateDataGroupName,
+  replaceConfigBackend,
+  replaceDataGroupBackend,
   type LegacyAppDataGroupMatch,
 } from './api.js';
+import { validateGroupName, GROUP_NAME_MAX_LENGTH } from './group-name.js';
 import { el, on, clear } from './render.js';
 import { STYLES } from './styles.js';
 import { openBackendForm } from './views/backend-form.js';
@@ -163,6 +169,18 @@ export class SyncGroupConfiguratorCore {
   private configBackends: BackendDescriptor[] = [];
   private dataGroups: AppDataGroupDescriptor[] = [];
   private dataBackends: BackendDescriptor[] = [];
+  /** Display name of the config-sync group (null → default title). */
+  private configGroupName: string | null = null;
+  /**
+   * Inline display-name editor state. `target` is `'config'` for the
+   * config-sync group or a data-group id. Kept in memory only.
+   */
+  private groupNameEdit: {
+    target: string;
+    value: string;
+    error: string | null;
+    saving: boolean;
+  } | null = null;
   /**
    * Live data-group instances loaded by `connect()` (keyed by group id). Only
    * these can report real sync status; a descriptor without an entry is shown
@@ -464,6 +482,12 @@ export class SyncGroupConfiguratorCore {
     } catch {
       this.configBackends = [];
     }
+    try {
+      const descriptor = await getConfigGroupDescriptor(this.repo);
+      this.configGroupName = descriptor?.name?.trim() || null;
+    } catch {
+      this.configGroupName = null;
+    }
   }
 
   private async loadDataGroups(): Promise<void> {
@@ -713,6 +737,202 @@ export class SyncGroupConfiguratorCore {
 
   // ── Rendering ────────────────────────────────────────────────────────
 
+  // ── Group display names (descriptor-only) ────────────────────────────
+
+  private isEditingGroupName(target: string): boolean {
+    return this.groupNameEdit?.target === target;
+  }
+
+  private startGroupNameEdit(target: string, current: string): void {
+    this.error = null;
+    this.groupNameEdit = { target, value: current, error: null, saving: false };
+    this.render();
+    const input = this.container.querySelector<HTMLInputElement>('.zfui-group-name-input');
+    input?.focus();
+    input?.select();
+  }
+
+  private cancelGroupNameEdit(): void {
+    this.groupNameEdit = null;
+    this.error = null;
+    this.render();
+  }
+
+  /** Inline editor used by both the config-sync header and data-group cards. */
+  private buildGroupNameEditor(target: string, current: string, label: string): HTMLElement {
+    const edit = this.groupNameEdit;
+    const wrap = el('div', { className: 'zfui-group-name-edit' });
+    const input = el('input', {
+      className: 'zfui-form-input zfui-group-name-input',
+      type: 'text',
+      maxlength: String(GROUP_NAME_MAX_LENGTH),
+      placeholder: `组名（最多 ${GROUP_NAME_MAX_LENGTH} 个字符）`,
+      'aria-label': label,
+    });
+    input.value = current;
+    const errorEl = el('span', { className: 'zfui-group-name-error' }, edit?.error ?? '');
+    const saveBtn = el('button', {
+      className: 'zfui-btn zfui-btn-primary zfui-btn-sm',
+      type: 'button',
+    }, '保存') as HTMLButtonElement;
+    const cancelBtn = el('button', {
+      className: 'zfui-btn zfui-btn-secondary zfui-btn-sm',
+      type: 'button',
+    }, '取消') as HTMLButtonElement;
+    if (edit?.saving) {
+      saveBtn.disabled = true;
+      cancelBtn.disabled = true;
+      saveBtn.textContent = '保存中...';
+    }
+    const save = () => { void this.handleSaveGroupName(target, input.value, errorEl); };
+    on(input, 'input', () => {
+      if (this.groupNameEdit) this.groupNameEdit.value = input.value;
+      errorEl.textContent = '';
+    });
+    on(input, 'keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Enter') { e.preventDefault(); save(); }
+      if (e.key === 'Escape') { e.preventDefault(); this.cancelGroupNameEdit(); }
+    });
+    on(saveBtn, 'click', save);
+    on(cancelBtn, 'click', () => this.cancelGroupNameEdit());
+    wrap.appendChild(input);
+    wrap.appendChild(saveBtn);
+    wrap.appendChild(cancelBtn);
+    wrap.appendChild(errorEl);
+    return wrap;
+  }
+
+  /**
+   * Persist a display name. Only the descriptor changes (user requirement:
+   * 只改描述符，不动 pair、不动本地/远端数据). Sync pairs, local stores and
+   * remote data are untouched, so existing pairs keep working.
+   */
+  private async handleSaveGroupName(
+    target: string,
+    rawValue: string,
+    errorEl?: HTMLElement,
+  ): Promise<void> {
+    if (!this.repo || !this.groupNameEdit) return;
+    const validation = validateGroupName(rawValue);
+    if (!validation.ok) {
+      this.groupNameEdit.value = rawValue;
+      this.groupNameEdit.error = validation.error;
+      if (errorEl) errorEl.textContent = validation.error;
+      return;
+    }
+    this.groupNameEdit.value = rawValue;
+    this.groupNameEdit.saving = true;
+    this.groupNameEdit.error = null;
+    try {
+      if (target === 'config') {
+        await updateConfigGroupName(this.repo, validation.name);
+        this.configGroupName = validation.name;
+      } else {
+        await updateDataGroupName(this.repo, target, validation.name);
+        await this.loadDataGroups();
+      }
+      this.groupNameEdit = null;
+      this.error = null;
+      // Re-render this widget only — card titles and status rows update
+      // immediately, without reloading the page.
+      this.render();
+    } catch (err) {
+      const message = `保存组名失败：${err instanceof Error ? err.message : String(err)}`;
+      console.error('[zenfs-config-ui] rename group FAILED:', err);
+      this.error = message;
+      if (this.groupNameEdit) {
+        this.groupNameEdit.saving = false;
+        this.groupNameEdit.error = message;
+      }
+      this.render();
+    }
+  }
+
+  // ── Backend parameter editing (destructive: rebuilds the pair) ───────
+
+  private openBackendParamEditor(
+    kind: 'config' | 'data',
+    groupId: string | null,
+    backend: { id: string; type: string; options?: Record<string, unknown>; description?: string },
+  ): void {
+    const oldOptions = backend.options ?? {};
+    const oldDescription = backend.description;
+    openBackendForm({
+      metadataList: this.metadata,
+      defaultType: backend.type,
+      initial: {
+        id: backend.id,
+        type: backend.type,
+        options: oldOptions,
+        description: oldDescription,
+      },
+      notice:
+        '修改参数等于换一个远端目标：旧同步对会拆掉并重建；旧远端已有数据不会自动迁移到新目标；'
+        + '保存后会立即对新目标做一次初始同步。后端 id 保持不变。'
+        + '敏感字段默认脱敏（只显示后 4 位），直接输入可覆盖，留空表示保持原值。'
+        + '若新参数与已有后端指向同一远端（类型+参数完全相同），保存会被拒绝并提示重复的后端 id。',
+      confirm: { label: '我已知晓：改参数会重建同步对，旧远端数据不会自动迁移' },
+      submitLabel: '确认修改并重建同步对',
+      onSubmit: async (result) => {
+        // Blank secret fields are omitted by the form, so merging keeps them.
+        const merged = { ...oldOptions, ...result.options };
+        const description = result.description || oldDescription;
+        await this.handleSaveBackendParams(
+          kind,
+          groupId,
+          backend.id,
+          backend.type,
+          merged,
+          description,
+        );
+      },
+      onCancel: () => { /* nothing to undo — cancel leaves everything as-is */ },
+    });
+  }
+
+  private async handleSaveBackendParams(
+    kind: 'config' | 'data',
+    groupId: string | null,
+    id: string,
+    type: string,
+    options: Record<string, unknown>,
+    description?: string,
+  ): Promise<void> {
+    if (!this.repo) throw new Error('配置仓库未连接');
+    if (kind === 'data' && !groupId) throw new Error('缺少数据组 id');
+    try {
+      if (kind === 'config') {
+        await replaceConfigBackend(this.repo, id, type, options, description);
+        await this.loadConfigBackends();
+      } else {
+        const updated = await replaceDataGroupBackend(
+          this.repo,
+          groupId!,
+          id,
+          type,
+          options,
+          description,
+        );
+        this.groupInstances.set(groupId!, updated);
+        if (this.dataGroup && this.dataGroup.groupId === groupId) {
+          this.dataGroup = updated;
+          this.dataBackends = listDataBackends(updated);
+        }
+        await this.loadDataGroups();
+      }
+      this.error = null;
+      // Refresh cards + status rows in place; no full page reload.
+      this.render();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[zenfs-config-ui] update backend params FAILED:', err);
+      this.error = `更新后端参数失败：${message}`;
+      this.render();
+      // Rethrow so the modal stays open and shows the error inline.
+      throw err;
+    }
+  }
+
   private injectStyles(): void {
     this.styleEl = document.createElement('style');
     this.styleEl.textContent = STYLES;
@@ -747,10 +967,25 @@ export class SyncGroupConfiguratorCore {
 
     // Header
     const header = el('div', { className: 'zfui-header' });
-    const titleText = this.mode === 'config-sync' ? '配置同步组'
+    const titleText = this.mode === 'config-sync'
+      ? (this.configGroupName ? `配置同步组 · ${this.configGroupName}` : '配置同步组')
       : this.mode === 'data-sync' ? '数据同步组' : '同步组';
+    const titleRow = el('div', { className: 'zfui-title-row' });
+    titleRow.appendChild(el('h1', { className: 'zfui-title' }, titleText));
+    if (this.mode === 'config-sync' && !this.isEditingGroupName('config')) {
+      const editBtn = el('button', {
+        className: 'zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn',
+        type: 'button',
+        title: '编辑配置同步组的显示名称（只改描述符，不影响后端与同步）',
+      }, '编辑');
+      on(editBtn, 'click', () => this.startGroupNameEdit('config', this.configGroupName ?? ''));
+      titleRow.appendChild(editBtn);
+    }
+    if (this.mode === 'config-sync' && this.isEditingGroupName('config')) {
+      titleRow.appendChild(this.buildGroupNameEditor('config', this.configGroupName ?? '', '配置同步组名称'));
+    }
     header.appendChild(el('div', {}, [
-      el('h1', { className: 'zfui-title' }, titleText),
+      titleRow,
       el('div', { className: 'zfui-subtitle' }, this.getSubtitle()),
     ]));
     if (this.backgroundConnecting) {
@@ -826,7 +1061,12 @@ export class SyncGroupConfiguratorCore {
     const list = el('ul', { className: 'zfui-backend-list' });
     list.appendChild(this.buildLocalBackendItem());
     for (const b of this.configBackends) {
-      list.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true));
+      list.appendChild(this.buildBackendItem(
+        b.id, b.type, b.options ?? {}, b.description, true,
+        undefined,
+        undefined,
+        () => this.openBackendParamEditor('config', null, b),
+      ));
     }
     syncSection.appendChild(list);
 
@@ -872,7 +1112,26 @@ export class SyncGroupConfiguratorCore {
     } else {
       for (const dg of this.dataGroups) {
         const card = el('div', { className: 'zfui-data-group' });
-        card.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.id));
+        // Card title row: display name (falls back to the stable id) plus the
+        // inline「编辑」entry. Editing only rewrites the descriptor's name.
+        const nameRow = el('div', { className: 'zfui-group-name-row' });
+        if (this.isEditingGroupName(dg.id)) {
+          nameRow.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.name || dg.id));
+          nameRow.appendChild(this.buildGroupNameEditor(dg.id, dg.name ?? '', '数据同步组名称'));
+        } else {
+          nameRow.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.name || dg.id));
+          if (dg.name) {
+            nameRow.appendChild(el('span', { className: 'zfui-group-id' }, `id: ${dg.id}`));
+          }
+          const editNameBtn = el('button', {
+            className: 'zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn',
+            type: 'button',
+            title: '编辑该组的显示名称（只改描述符，不影响后端与同步）',
+          }, '编辑');
+          on(editNameBtn, 'click', () => this.startGroupNameEdit(dg.id, dg.name ?? ''));
+          nameRow.appendChild(editNameBtn);
+        }
+        card.appendChild(nameRow);
         // Per-backend state tells us whether each *listed* descriptor actually
         // got a sync pair (a backend whose options are invalid gets none).
         const liveAtRender = this.groupInstances.get(dg.id);
@@ -902,6 +1161,7 @@ export class SyncGroupConfiguratorCore {
               b.id, b.type, b.options ?? {}, b.description, true,
               () => void this.handleRemoveDataGroupBackend(dg.id, b.id),
               backendStates.get(b.id)?.error,
+              () => this.openBackendParamEditor('data', dg.id, b),
             ));
           }
         }
@@ -954,7 +1214,12 @@ export class SyncGroupConfiguratorCore {
     const list = el('ul', { className: 'zfui-backend-list' });
     list.appendChild(this.buildLocalBackendItem());
     for (const b of this.dataBackends) {
-      list.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true));
+      list.appendChild(this.buildBackendItem(
+        b.id, b.type, b.options ?? {}, b.description, true,
+        undefined,
+        undefined,
+        () => this.openBackendParamEditor('data', this.dataGroup?.groupId ?? 'default', b),
+      ));
     }
     section.appendChild(list);
 
@@ -1080,6 +1345,7 @@ export class SyncGroupConfiguratorCore {
     removable: boolean,
     onRemove?: (id: string) => void,
     syncError?: { message: string; timestamp: number },
+    onEdit?: () => void,
   ): HTMLElement {
     const meta = this.metadata.find(m => m.type === type);
     const label = meta ? `${meta.icon} ${meta.label}` : type;
@@ -1140,6 +1406,15 @@ export class SyncGroupConfiguratorCore {
       }
     });
     actions.appendChild(copyBtn);
+
+    if (onEdit) {
+      const editBtn = el('button', {
+        className: 'zfui-btn zfui-btn-sm zfui-btn-secondary',
+        title: '编辑后端参数（更换远端目标并重建同步对）',
+      }, '编辑参数');
+      on(editBtn, 'click', onEdit);
+      actions.appendChild(editBtn);
+    }
 
     if (removable) {
       let confirming = false;

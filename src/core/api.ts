@@ -8,6 +8,7 @@ import type {
   AppDataGroupDescriptor,
   AppDataBackendDescriptor,
   BackendDescriptor,
+  ConfigSyncGroupDescriptor,
   SyncGroupType,
   ConnectResult,
 } from 'zen-fs-config';
@@ -179,6 +180,72 @@ export async function createDataGroup(
   backends: AppDataBackendDescriptor[],
 ): Promise<AppDataGroup> {
   return repo.createAppDataGroup(id, backends);
+}
+
+// ── Group display names (descriptor-only edits) ──────────────────────
+
+/**
+ * Read the config-sync group's own display descriptor. Absent until the user
+ * renames it once; older repos simply return null.
+ */
+export async function getConfigGroupDescriptor(
+  repo: IConfigRepo,
+): Promise<ConfigSyncGroupDescriptor | null> {
+  try {
+    return await repo.getConfigSyncGroupDescriptor();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rename the config-sync group. Backends, sync pairs and remote data are
+ * untouched — this only rewrites `.meta/config-sync-group.json`.
+ */
+export async function updateConfigGroupName(repo: IConfigRepo, name: string): Promise<void> {
+  await repo.updateConfigSyncGroupDescriptor({ name });
+}
+
+/**
+ * Rename a data-sync group. Backends, sync pairs and remote data are
+ * untouched — this only rewrites its descriptor's `name` field.
+ */
+export async function updateDataGroupName(
+  repo: IConfigRepo,
+  groupId: string,
+  name: string,
+): Promise<void> {
+  await repo.updateAppDataGroupName(groupId, name);
+}
+
+/**
+ * Replace a config-sync backend's parameters in place. The old pair is torn
+ * down and a new pair is created against the new target (initial sync runs
+ * immediately). Old remote data is not migrated.
+ */
+export async function replaceConfigBackend(
+  repo: IConfigRepo,
+  id: string,
+  type: string,
+  options: Record<string, unknown>,
+  description?: string,
+): Promise<void> {
+  await repo.replaceBackend(id, type, options, description);
+}
+
+/**
+ * Replace a data-sync backend's parameters in place. Same semantics as
+ * replaceConfigBackend. Returns the rebuilt live group handle.
+ */
+export async function replaceDataGroupBackend(
+  repo: IConfigRepo,
+  groupId: string,
+  backendId: string,
+  type: string,
+  options: Record<string, unknown>,
+  description?: string,
+): Promise<AppDataGroup> {
+  return repo.replaceAppDataGroupBackend(groupId, backendId, type, options, description);
 }
 
 // ── Legacy `app-data` group migration ────────────────────────────────

@@ -97,7 +97,12 @@ export const STYLES = `
 .zfui-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 
 .zfui-form-row { display: flex; gap: 8px; align-items: center; }
-.zfui-form-error { color: #dc2626; font-size: 12px; margin-top: 4px; }
+.zfui-form-error { color: #dc2626; font-size: 12px; margin-top: 4px; padding: 8px; background: #fef2f2; border-radius: 6px; }
+.zfui-form-notice { font-size: 12px; line-height: 1.6; color: #92400e; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+.zfui-confirm-group { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; }
+.zfui-confirm-label { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: #374151; cursor: pointer; }
+.zfui-confirm-label input { margin-top: 2px; }
+.zfui-form-hint { font-size: 11px; color: #6b7280; margin-top: 4px; }
 .zfui-divider { height: 1px; background: #e5e7eb; margin: 16px 0; }
 
 .zfui-inline-form {
@@ -128,7 +133,14 @@ export const STYLES = `
   border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;
   margin-bottom: 10px; background: #f9fafb;
 }
-.zfui-data-group-name { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.zfui-data-group-name { font-weight: 600; font-size: 13px; }
+.zfui-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.zfui-group-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.zfui-group-id { font-size: 11px; color: #6b7280; }
+.zfui-group-name-btn { flex-shrink: 0; }
+.zfui-group-name-edit { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; width: 100%; }
+.zfui-group-name-input { flex: 1; min-width: 160px; }
+.zfui-group-name-error { color: #b91c1c; font-size: 12px; }
 .zfui-status-line {
   font-size: 11px; color: #4b5563; line-height: 1.7; margin: 6px 0 4px;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

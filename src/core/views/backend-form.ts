@@ -7,11 +7,17 @@
  *
  * The form includes an "Import from config string" feature that parses a
  * `type:id:key=value,...` string and fills all fields automatically.
+ *
+ * When `initial` is provided the form edits an existing backend: the id and
+ * type are locked, secret fields are shown masked (blank = keep the stored
+ * value), and a notice + optional confirmation checkbox explain that changing
+ * parameters switches the remote target.
  */
 import type { BackendMetadata } from '../../types.js';
 import { el, on, clear } from '../render.js';
 import { STYLES } from '../styles.js';
 import { deserializeBackend } from '../config-string.js';
+import { maskSecret } from '../secret.js';
 
 let globalStylesInjected = false;
 function injectGlobalStyles(): void {
@@ -40,6 +46,13 @@ interface BackendFormOptions {
   mode?: 'modal' | 'inline';
   /** Required when mode === 'inline'. The form is rendered into this element. */
   container?: HTMLElement;
+  /** Pre-fill and lock id/type when editing an existing backend. */
+  initial?: { id: string; type: string; options: Record<string, unknown>; description?: string };
+  /** Explanatory block (e.g. changing parameters switches the remote target). */
+  notice?: string;
+  /** Require an explicit checkbox before submitting (destructive edits). */
+  confirm?: { label: string };
+  submitLabel?: string;
   onSubmit: (result: BackendFormResult) => Promise<void> | void;
   onCancel: () => void;
 }
@@ -69,20 +82,31 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
     opts.container.appendChild(root);
   }
 
-  const type = defaultType ?? metadataList[0]?.type ?? '';
+  const editing = opts.initial;
+  const type = editing?.type ?? defaultType ?? metadataList[0]?.type ?? '';
   const state = {
     type,
-    id: '',
-    description: '',
+    id: editing?.id ?? '',
+    description: editing?.description ?? '',
     options: {} as Record<string, string>,
     accountBackendId: '' as string,
     importStr: '',
     importError: '',
     submitError: '',
+    confirmChecked: false,
   };
 
   const initialMeta = metadataList.find((m) => m.type === type);
-  if (initialMeta) {
+  if (editing) {
+    // Keep non-secret values; secret fields start blank so「留空=保持原值」
+    // works and the old value is never rendered in clear text.
+    for (const [key, value] of Object.entries(editing.options ?? {})) {
+      state.options[key] = value == null ? '' : String(value);
+    }
+    for (const field of initialMeta?.fields ?? []) {
+      if (field.type === 'password') delete state.options[field.key];
+    }
+  } else if (initialMeta) {
     state.options = { ...initialMeta.defaultOptions };
     state.id = `${type.toLowerCase()}-${Date.now().toString(36)}`;
   }
@@ -91,43 +115,54 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
     clear(root);
     const meta = metadataList.find((m) => m.type === state.type);
 
-    root.appendChild(el('div', { className: 'zfui-modal-title' }, title ?? '添加后端'));
+    root.appendChild(el(
+      'div',
+      { className: 'zfui-modal-title' },
+      title ?? (editing ? `编辑后端参数 · ${state.id}` : '添加后端'),
+    ));
 
-    // ── Import from config string ──────────────────────────────────────
-    const importGroup = el('div', { className: 'zfui-form-group' });
-    importGroup.appendChild(el('label', { className: 'zfui-form-label' }, '从配置字符串导入（可选）'));
-    const importRow = el('div', { className: 'zfui-form-row' });
-    const importInput = el('input', {
-      className: 'zfui-form-input',
-      value: state.importStr,
-      placeholder: 'type:id:key=value,key=value',
-      style: 'font-family:monospace;font-size:12px;flex:1',
-    });
-    on(importInput, 'input', () => { state.importStr = importInput.value; });
-    const importBtn = el('button', { className: 'zfui-btn zfui-btn-sm' }, '导入');
-    on(importBtn, 'click', () => {
-      const parsed = deserializeBackend(state.importStr, metadataList);
-      if (!parsed) {
-        state.importError = '格式无效或未知类型。示例: Gitee:my-repo:owner=weijia,repo=configs';
-        render();
-        return;
-      }
-      state.type = parsed.type;
-      state.id = parsed.id;
-      state.options = { ...parsed.options };
-      state.description = parsed.description;
-      state.importError = '';
-      render();
-    });
-    importRow.appendChild(importInput);
-    importRow.appendChild(importBtn);
-    importGroup.appendChild(importRow);
-    if (state.importError) {
-      importGroup.appendChild(el('div', { className: 'zfui-form-error' }, state.importError));
+    // ── Edit notice (semantics of changing parameters) ────────────────
+    if (opts.notice) {
+      root.appendChild(el('div', { className: 'zfui-form-notice' }, opts.notice));
     }
-    root.appendChild(importGroup);
 
-    root.appendChild(el('div', { className: 'zfui-divider' }));
+    // ── Import from config string (only when creating) ────────────────
+    if (!editing) {
+      const importGroup = el('div', { className: 'zfui-form-group' });
+      importGroup.appendChild(el('label', { className: 'zfui-form-label' }, '从配置字符串导入（可选）'));
+      const importRow = el('div', { className: 'zfui-form-row' });
+      const importInput = el('input', {
+        className: 'zfui-form-input',
+        value: state.importStr,
+        placeholder: 'type:id:key=value,key=value',
+        style: 'font-family:monospace;font-size:12px;flex:1',
+      });
+      on(importInput, 'input', () => { state.importStr = importInput.value; });
+      const importBtn = el('button', { className: 'zfui-btn zfui-btn-sm' }, '导入');
+      on(importBtn, 'click', () => {
+        const parsed = deserializeBackend(state.importStr, metadataList);
+        if (!parsed) {
+          state.importError = '格式无效或未知类型。示例: Gitee:my-repo:owner=weijia,repo=configs';
+          render();
+          return;
+        }
+        state.type = parsed.type;
+        state.id = parsed.id;
+        state.options = { ...parsed.options };
+        state.description = parsed.description;
+        state.importError = '';
+        render();
+      });
+      importRow.appendChild(importInput);
+      importRow.appendChild(importBtn);
+      importGroup.appendChild(importRow);
+      if (state.importError) {
+        importGroup.appendChild(el('div', { className: 'zfui-form-error' }, state.importError));
+      }
+      root.appendChild(importGroup);
+
+      root.appendChild(el('div', { className: 'zfui-divider' }));
+    }
 
     // ── Backend type selector ──────────────────────────────────────────
     const typeGroup = el('div', { className: 'zfui-form-group' });
@@ -137,6 +172,11 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
       const opt = el('option', { value: m.type }, `${m.icon} ${m.label}`);
       if (m.type === state.type) opt.setAttribute('selected', '');
       typeSelect.appendChild(opt);
+    }
+    if (editing) {
+      // Type is part of the backend identity and never changes on edit.
+      typeSelect.disabled = true;
+      typeSelect.title = '编辑时不能更改后端类型';
     }
     on(typeSelect, 'change', () => {
       state.type = typeSelect.value;
@@ -161,14 +201,18 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
       placeholder: 'backend-id',
       style: 'font-family:monospace',
     });
-    on(idInput, 'input', () => { state.id = idInput.value; });
+    if (editing) {
+      idInput.readOnly = true;
+      idInput.title = '后端 id 保持不变';
+    }
+    on(idInput, 'input', () => { if (!editing) state.id = idInput.value; });
     idGroup.appendChild(idInput);
     root.appendChild(idGroup);
 
     // ── Dynamic fields ─────────────────────────────────────────────────
     if (meta) {
       const accountFields = new Set(meta.accountFields ?? []);
-      const hasAccountReuse = opts.allowAccountReuse && accountFields.size > 0 && (opts.accountBackends?.length ?? 0) > 0;
+      const hasAccountReuse = !editing && opts.allowAccountReuse && accountFields.size > 0 && (opts.accountBackends?.length ?? 0) > 0;
 
       if (hasAccountReuse) {
         const accGroup = el('div', { className: 'zfui-form-group' });
@@ -201,14 +245,25 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
           on(sel, 'change', () => { state.options[field.key] = sel.value; });
           fg.appendChild(sel);
         } else {
+          const storedSecret = editing ? editing.options?.[field.key] : undefined;
+          const isSecret = field.type === 'password';
+          const maskedHint = isSecret && storedSecret != null && storedSecret !== ''
+            ? `已保存 ${maskSecret(storedSecret)}（留空保持不变）`
+            : field.placeholder ?? '';
           const input = el('input', {
             className: 'zfui-form-input',
-            type: field.type === 'password' ? 'password' : 'text',
+            type: isSecret ? 'password' : 'text',
             value: state.options[field.key] ?? '',
-            placeholder: field.placeholder ?? '',
+            placeholder: maskedHint,
           });
+          if (isSecret && storedSecret != null && storedSecret !== '') {
+            input.title = '敏感字段默认脱敏；直接输入可覆盖，留空表示保持原值';
+          }
           on(input, 'input', () => { state.options[field.key] = input.value; });
           fg.appendChild(input);
+          if (isSecret && editing) {
+            fg.appendChild(el('div', { className: 'zfui-form-hint' }, '留空 = 保持原值（不会以明文显示已保存的 token）'));
+          }
         }
         root.appendChild(fg);
       }
@@ -222,6 +277,19 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
     descGroup.appendChild(descInput);
     root.appendChild(descGroup);
 
+    // ── Explicit confirmation (destructive parameter changes) ─────────
+    if (opts.confirm) {
+      const confirmGroup = el('div', { className: 'zfui-form-group zfui-confirm-group' });
+      const confirmLabel = el('label', { className: 'zfui-confirm-label' });
+      const confirmBox = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      confirmBox.checked = state.confirmChecked;
+      on(confirmBox, 'change', () => { state.confirmChecked = confirmBox.checked; });
+      confirmLabel.appendChild(confirmBox);
+      confirmLabel.appendChild(el('span', {}, opts.confirm.label));
+      confirmGroup.appendChild(confirmLabel);
+      root.appendChild(confirmGroup);
+    }
+
     // ── Submit error (inline, no alert) ────────────────────────────────
     if (state.submitError) {
       root.appendChild(el('div', { className: 'zfui-form-error' }, state.submitError));
@@ -232,13 +300,18 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
     const cancelBtn = el('button', { className: 'zfui-btn' }, '取消');
     on(cancelBtn, 'click', () => close());
     actions.appendChild(cancelBtn);
-    const submitBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '连接');
+    const submitBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, opts.submitLabel ?? '连接');
     on(submitBtn, 'click', async () => {
       state.submitError = '';
+      if (opts.confirm && !state.confirmChecked) {
+        state.submitError = '请先勾选确认后再保存';
+        render();
+        return;
+      }
       if (!state.id.trim()) { state.submitError = '请填写后端 ID'; render(); return; }
       if (!state.type) { state.submitError = '请选择后端类型'; render(); return; }
       submitBtn.setAttribute('disabled', 'true');
-      submitBtn.textContent = '连接中...';
+      submitBtn.textContent = editing ? '保存中...' : '连接中...';
       try {
         await onSubmit({
           id: state.id.trim(),
@@ -250,7 +323,7 @@ export function openBackendForm(opts: BackendFormOptions): HTMLElement | null {
       } catch (err) {
         state.submitError = err instanceof Error ? err.message : String(err);
         submitBtn.removeAttribute('disabled');
-        submitBtn.textContent = '连接';
+        submitBtn.textContent = opts.submitLabel ?? '连接';
         render();
       }
     });
