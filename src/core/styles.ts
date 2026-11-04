@@ -53,13 +53,16 @@ export const STYLES = `
   margin-bottom: 8px; background: #fafafa;
 }
 .zfui-backend-item-primary { border-left: 3px solid #10b981; }
+.zfui-backend-item-error { border-left: 3px solid #ef4444; background: #fef2f2; }
 .zfui-backend-name { font-weight: 500; font-family: monospace; font-size: 13px; }
 .zfui-backend-type { font-size: 12px; color: #6b7280; margin-left: 8px; }
+.zfui-backend-error-detail { font-size: 11px; color: #b91c1c; margin-top: 2px; word-break: break-all; }
 .zfui-badge {
   display: inline-block; padding: 1px 8px; border-radius: 10px;
   font-size: 11px; font-weight: 500;
 }
 .zfui-badge-primary { background: #d1fae5; color: #065f46; }
+.zfui-badge-error { background: #fee2e2; color: #991b1b; margin-left: 8px; }
 
 .zfui-empty {
   text-align: center; color: #9ca3af; font-size: 13px;
@@ -137,5 +140,5 @@ export const STYLES = `
   color: #374151; flex-shrink: 0;
 }
 .zfui-status-refresh:hover { background: #e5e7eb; }
-.zfui-status-detail { font-size: 11px; color: #6b7280; line-height: 1.7; }
+.zfui-status-detail { font-size: 11px; color: #6b7280; line-height: 1.7; white-space: pre-line; }
 `;

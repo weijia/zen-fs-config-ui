@@ -116,10 +116,33 @@ function formatSyncStatuses(statuses: Map<string, SyncPairStatus>): {
   return { text, error: lastError };
 }
 
+/** One backend that could not be connected, so it has no sync pair. */
+export interface FailedBackend {
+  id: string;
+  message: string;
+}
+
+export interface GroupStatusSnapshot {
+  statuses: Map<string, SyncPairStatus>;
+  failed: FailedBackend[];
+}
+
+/** Suffix shown on the status line when some descriptors have no pair. */
+export function formatBackendFailureSummary(failed: FailedBackend[]): string {
+  return failed.length === 0 ? '' : ` · ${failed.length} 个后端未建立同步对`;
+}
+
+/** Detail lines naming each backend that failed to connect. */
+export function formatBackendFailureDetail(failed: FailedBackend[]): string {
+  return failed
+    .map((f) => `未建立同步对：${f.id} · ${String(f.message).slice(0, 120)}`)
+    .join('\n');
+}
+
 interface StatusRowRef {
   textEl: HTMLElement;
   detailEl: HTMLElement;
-  read: () => Map<string, SyncPairStatus> | null;
+  read: () => GroupStatusSnapshot | null;
   /** Set when the group has no live instance in this session. */
   unavailable?: string;
 }
@@ -640,11 +663,17 @@ export class SyncGroupConfiguratorCore {
         this.render();
         return;
       }
-      // Operate on the descriptor directly instead of re-instantiating the
-      // group. Re-instantiating then calling removeBackend() fails when the
-      // backend cannot be re-created (init() skips failed backends, so
-      // removeBackend() throws "Backend not found").
-      await removeAppDataGroupBackend(this.repo, groupId, backendId);
+      // Prefer the live instance: removeBackend() drops the pair AND clears the
+      // per-backend error state, so the status line stops reporting a backend
+      // that is no longer listed. It also handles descriptors that never got a
+      // pair (e.g. createBackend failed), which the descriptor-only path cannot.
+      const live = this.groupInstances.get(groupId);
+      if (live) {
+        await live.removeBackend(backendId);
+      } else {
+        // Group is not instantiated in this session — edit the descriptor only.
+        await removeAppDataGroupBackend(this.repo, groupId, backendId);
+      }
       console.log('[zenfs-config-ui] descriptor updated, backends now:', dg.backends.filter(b => b.id !== backendId).map(b => b.id));
       await this.loadDataGroups();
       this.render();
@@ -791,7 +820,7 @@ export class SyncGroupConfiguratorCore {
     // Config-sync group's own status: repo.getSyncStatuses() covers its
     // replica pairs (local primary ↔ each config backend).
     syncSection.appendChild(this.buildStatusRow(
-      () => (this.repo ? this.repo.getSyncStatuses() : null),
+      () => (this.repo ? { statuses: this.repo.getSyncStatuses(), failed: [] } : null),
     ));
 
     const list = el('ul', { className: 'zfui-backend-list' });
@@ -844,12 +873,20 @@ export class SyncGroupConfiguratorCore {
       for (const dg of this.dataGroups) {
         const card = el('div', { className: 'zfui-data-group' });
         card.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.id));
+        // Per-backend state tells us whether each *listed* descriptor actually
+        // got a sync pair (a backend whose options are invalid gets none).
+        const liveAtRender = this.groupInstances.get(dg.id);
+        const backendStates = liveAtRender?.getBackendSyncStates() ?? new Map();
         // Each data-group card reads its OWN live instance's status, so two
         // groups never share numbers (their sync engines are separate).
         card.appendChild(this.buildStatusRow(
           () => {
             const live = this.groupInstances.get(dg.id);
-            return live ? live.getSyncStatuses() : null;
+            if (!live) return null;
+            const failed = [...live.getBackendSyncStates().values()]
+              .filter((s) => s.error)
+              .map((s) => ({ id: s.backendId, message: s.error!.message }));
+            return { statuses: live.getSyncStatuses(), failed };
           },
           this.groupInstances.has(dg.id) ? undefined : this.groupUnavailable.get(dg.id),
         ));
@@ -860,7 +897,12 @@ export class SyncGroupConfiguratorCore {
           for (const b of dg.backends) {
             // 每个后端显示只读配置串 + 📋复制配置串；removable=true 提供删除按钮，
             // 删除回调绑定所属数据组 id，删除的是数据组内的后端（非配置后端）。
-            dgList.appendChild(this.buildBackendItem(b.id, b.type, b.options ?? {}, b.description, true, () => void this.handleRemoveDataGroupBackend(dg.id, b.id)));
+            // 建连失败的后端仍可删除（zen-fs-config 的 removeBackend 支持无实例描述符）。
+            dgList.appendChild(this.buildBackendItem(
+              b.id, b.type, b.options ?? {}, b.description, true,
+              () => void this.handleRemoveDataGroupBackend(dg.id, b.id),
+              backendStates.get(b.id)?.error,
+            ));
           }
         }
         card.appendChild(dgList);
@@ -906,7 +948,7 @@ export class SyncGroupConfiguratorCore {
     section.appendChild(el('div', { className: 'zfui-section-title' }, '🔗 同步后端'));
     // Standalone data-sync group: its own sync engine's status.
     section.appendChild(this.buildStatusRow(
-      () => (this.dataGroup ? this.dataGroup.getSyncStatuses() : null),
+      () => (this.dataGroup ? { statuses: this.dataGroup.getSyncStatuses(), failed: [] } : null),
     ));
 
     const list = el('ul', { className: 'zfui-backend-list' });
@@ -931,7 +973,7 @@ export class SyncGroupConfiguratorCore {
    * an already-live instance, or returns null when there is none.
    */
   private buildStatusRow(
-    read: () => Map<string, SyncPairStatus> | null,
+    read: () => GroupStatusSnapshot | null,
     unavailable?: string,
   ): HTMLElement {
     const wrap = el('div', { className: 'zfui-status-block' });
@@ -962,9 +1004,9 @@ export class SyncGroupConfiguratorCore {
         ref.detailEl.textContent = '';
         continue;
       }
-      let statuses: Map<string, SyncPairStatus> | null = null;
+      let snapshot: GroupStatusSnapshot | null = null;
       try {
-        statuses = ref.read();
+        snapshot = ref.read();
       } catch (err) {
         ref.textEl.textContent = '同步状态读取失败 · '
           + (err instanceof Error ? err.message : String(err));
@@ -972,18 +1014,26 @@ export class SyncGroupConfiguratorCore {
         ref.detailEl.textContent = '';
         continue;
       }
-      if (!statuses) {
+      if (!snapshot) {
         ref.textEl.textContent = '未连接 · 该组没有当前会话的实例，暂无实时状态';
         ref.textEl.parentElement?.classList.add('err');
         ref.detailEl.textContent = '';
         continue;
       }
-      ref.textEl.parentElement?.classList.remove('err');
-      const { text, error } = formatSyncStatuses(statuses);
-      ref.textEl.textContent = text;
-      ref.detailEl.textContent = error
-        ? `最后错误 ${fmtClock(error.timestamp)} · ${String(error.message).slice(0, 120)}`
-        : '';
+      const { text, error } = formatSyncStatuses(snapshot.statuses);
+      const failed = snapshot.failed;
+      // A backend that failed to connect has no pair, so the pair count alone
+      // would silently understate what the card lists. Name it explicitly.
+      if (failed.length > 0) {
+        ref.textEl.parentElement?.classList.add('err');
+      } else {
+        ref.textEl.parentElement?.classList.remove('err');
+      }
+      ref.textEl.textContent = text + formatBackendFailureSummary(failed);
+      const detailParts: string[] = [];
+      if (failed.length > 0) detailParts.push(formatBackendFailureDetail(failed));
+      if (error) detailParts.push(`最后错误 ${fmtClock(error.timestamp)} · ${String(error.message).slice(0, 120)}`);
+      ref.detailEl.textContent = detailParts.join('\n');
     }
   }
 
@@ -1029,17 +1079,30 @@ export class SyncGroupConfiguratorCore {
     description: string | undefined,
     removable: boolean,
     onRemove?: (id: string) => void,
+    syncError?: { message: string; timestamp: number },
   ): HTMLElement {
     const meta = this.metadata.find(m => m.type === type);
     const label = meta ? `${meta.icon} ${meta.label}` : type;
 
-    const li = el('li', { className: 'zfui-backend-item' });
+    const li = el('li', {
+      className: syncError ? 'zfui-backend-item zfui-backend-item-error' : 'zfui-backend-item',
+      title: syncError ? `未建立同步对：${syncError.message}` : undefined,
+    });
     const info = el('div', {}, [
       el('span', { className: 'zfui-backend-name' }, id),
       el('span', { className: 'zfui-backend-type' }, label),
     ]);
+    if (syncError) {
+      info.appendChild(el('span', { className: 'zfui-badge zfui-badge-error' }, '⚠ 未建立同步对'));
+    }
     if (description) {
       info.appendChild(el('div', { style: 'font-size:11px;color:#9ca3af;margin-top:2px' }, description));
+    }
+    if (syncError) {
+      info.appendChild(el('div', {
+        className: 'zfui-backend-error-detail',
+        title: syncError.message,
+      }, `未建立同步对：${String(syncError.message).slice(0, 160)}`));
     }
     li.appendChild(info);
 
