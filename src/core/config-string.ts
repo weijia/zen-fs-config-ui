@@ -71,8 +71,25 @@ export function deserializeBackend(
 
   const options: Record<string, string> = { ...(meta.defaultOptions ?? {}) };
   let description = '';
-  if (optionsStr) {
-    for (const pair of optionsStr.split(',')) {
+
+  // `:desc=` terminates the options segment. The description itself may contain
+  // colons, commas, spaces and CJK text, so it is split off ONCE and the whole
+  // remainder is taken literally — otherwise the last option would swallow
+  // `:desc=...` into its value (e.g. `token=...:desc=Gitee 仓库`).
+  const DESC_MARKER = ':desc=';
+  let optionsPart = optionsStr;
+  const descIdx = optionsPart.indexOf(DESC_MARKER);
+  if (descIdx >= 0) {
+    description = optionsPart.slice(descIdx + DESC_MARKER.length);
+    optionsPart = optionsPart.slice(0, descIdx);
+  } else if (optionsPart.startsWith('desc=')) {
+    // No options at all: `type:id:desc=...`
+    description = optionsPart.slice('desc='.length);
+    optionsPart = '';
+  }
+
+  if (optionsPart) {
+    for (const pair of optionsPart.split(',')) {
       const eq = pair.indexOf('=');
       if (eq < 0) continue;
       const key = pair.slice(0, eq);
