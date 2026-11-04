@@ -1174,6 +1174,8 @@ export class SyncGroupConfiguratorCore {
       id: group?.groupId ?? 'default',
       name: null,
       backends: this.dataBackends,
+      // Standalone data-sync mode keeps its read-only local primary row.
+      showLocalPrimary: true,
       read: () => (group
         ? {
             statuses: group.getSyncStatuses(),
