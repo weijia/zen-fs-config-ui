@@ -129,11 +129,18 @@ export const STYLES = `
 }
 .zfui-error-actions { margin-top: 8px; }
 
-.zfui-data-group {
+.zfui-group-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.zfui-group-card {
   border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;
-  margin-bottom: 10px; background: #f9fafb;
+  background: #f9fafb;
 }
-.zfui-data-group-name { font-weight: 600; font-size: 13px; }
+.zfui-group-card-config { border-left: 3px solid #2563eb; }
+.zfui-group-card-data { border-left: 3px solid #15803d; }
+.zfui-group-card-name { font-weight: 600; font-size: 13px; }
+.zfui-group-kind-config { background: #dbeafe; color: #1d4ed8; }
+.zfui-group-kind-data { background: #dcfce7; color: #15803d; }
+.zfui-group-kind-hint { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+.zfui-group-card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .zfui-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .zfui-group-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .zfui-group-id { font-size: 11px; color: #6b7280; }

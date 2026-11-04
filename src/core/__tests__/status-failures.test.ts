@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   formatBackendFailureSummary,
   formatBackendFailureDetail,
+  collectFailedBackends,
 } from '../configurator';
 
 describe('backend failure status text', () => {
@@ -23,5 +24,25 @@ describe('backend failure status text', () => {
       { id: 'b', message: 'Unknown backend type: Foo' },
     ];
     expect(formatBackendFailureSummary(failed)).toBe(' · 2 个后端未建立同步对');
+  });
+});
+
+describe('collectFailedBackends (unified status source)', () => {
+  it('returns nothing when no per-backend state is available', () => {
+    // Older core exposes only getSyncStatuses(); the card must still render.
+    expect(collectFailedBackends(undefined)).toEqual([]);
+  });
+
+  it('collects only descriptors that failed to connect', () => {
+    const states = new Map([
+      ['ok', { backendId: 'ok', pairId: 'pair-ok' }],
+      ['bad', {
+        backendId: 'bad',
+        error: { message: 'Missing required option: token', timestamp: 1 },
+      }],
+    ]);
+    expect(collectFailedBackends(states)).toEqual([
+      { id: 'bad', message: 'Missing required option: token' },
+    ]);
   });
 });

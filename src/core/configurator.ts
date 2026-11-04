@@ -9,6 +9,7 @@ import type {
   AppDataGroup,
   BackendDescriptor,
   AppDataGroupDescriptor,
+  BackendSyncState,
   SyncPairStatus,
 } from 'zen-fs-config';
 import { localPrimaryType } from 'zen-fs-config';
@@ -128,9 +129,63 @@ export interface FailedBackend {
   message: string;
 }
 
+/**
+ * Config-sync repo augmented with the per-backend state API. It exists on
+ * newer zen-fs-config releases; the optional call keeps this UI working with
+ * cores that only expose `getSyncStatuses()`.
+ */
+type RepoWithBackendSyncState = IConfigRepo & {
+  getBackendSyncStates?(): Map<string, BackendSyncState>;
+};
+
+/**
+ * Collect descriptors that failed to connect. They have no sync pair, so
+ * `getSyncStatuses()` alone would understate the backends a card lists.
+ */
+export function collectFailedBackends(
+  states?: Map<string, BackendSyncState> | null,
+): FailedBackend[] {
+  if (!states) return [];
+  const failed: FailedBackend[] = [];
+  for (const state of states.values()) {
+    if (state.error) {
+      failed.push({ id: state.backendId, message: state.error.message });
+    }
+  }
+  return failed;
+}
+
 export interface GroupStatusSnapshot {
   statuses: Map<string, SyncPairStatus>;
   failed: FailedBackend[];
+}
+
+/**
+ * Everything one group card needs, regardless of whether it is the config
+ * group or a data group. `kind` only switches the card's own sections (local
+ * primary row, legacy notice, delete-group action) — the status line, name
+ * editor and backend rows are shared.
+ */
+interface GroupCardSpec {
+  kind: 'config' | 'data';
+  /** Stable identifier: `config` for the config group, the data group id otherwise. */
+  id: string;
+  name: string | null;
+  backends: BackendDescriptor[];
+  /** Status reader; must never instantiate a group. */
+  read: () => GroupStatusSnapshot | null;
+  /** Same per-backend state used to label individual failed backend rows. */
+  readStates?: () => Map<string, BackendSyncState> | undefined;
+  /** Reason shown when the group has no live instance in this session. */
+  unavailable?: string;
+  /** The config group renders the implicit local primary as a read-only row. */
+  showLocalPrimary?: boolean;
+  onAddBackend: () => void;
+  onRemoveBackend?: (backendId: string) => void;
+  onEditBackend?: (backend: BackendDescriptor) => void;
+  onRemoveGroup?: () => void;
+  /** Config-specific block (e.g. legacy group migration) appended to the card. */
+  configExtras?: () => HTMLElement | null;
 }
 
 /** Suffix shown on the status line when some descriptors have no pair. */
@@ -968,22 +1023,10 @@ export class SyncGroupConfiguratorCore {
     // Header
     const header = el('div', { className: 'zfui-header' });
     const titleText = this.mode === 'config-sync'
-      ? (this.configGroupName ? `配置同步组 · ${this.configGroupName}` : '配置同步组')
+      ? '同步组'
       : this.mode === 'data-sync' ? '数据同步组' : '同步组';
     const titleRow = el('div', { className: 'zfui-title-row' });
     titleRow.appendChild(el('h1', { className: 'zfui-title' }, titleText));
-    if (this.mode === 'config-sync' && !this.isEditingGroupName('config')) {
-      const editBtn = el('button', {
-        className: 'zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn',
-        type: 'button',
-        title: '编辑配置同步组的显示名称（只改描述符，不影响后端与同步）',
-      }, '编辑');
-      on(editBtn, 'click', () => this.startGroupNameEdit('config', this.configGroupName ?? ''));
-      titleRow.appendChild(editBtn);
-    }
-    if (this.mode === 'config-sync' && this.isEditingGroupName('config')) {
-      titleRow.appendChild(this.buildGroupNameEditor('config', this.configGroupName ?? '', '配置同步组名称'));
-    }
     header.appendChild(el('div', {}, [
       titleRow,
       el('div', { className: 'zfui-subtitle' }, this.getSubtitle()),
@@ -1047,187 +1090,239 @@ export class SyncGroupConfiguratorCore {
     return section;
   }
 
+  /** Unified group list: the config group plus every data group, one card each. */
   private buildConfigSyncView(): HTMLElement {
-    const frag = document.createDocumentFragment();
+    const section = el('div', { className: 'zfui-section' });
+    section.appendChild(el('div', { className: 'zfui-section-title' }, '🔗 同步组'));
 
-    const syncSection = el('div', { className: 'zfui-section' });
-    syncSection.appendChild(el('div', { className: 'zfui-section-title' }, '🔧 同步后端'));
-    // Config-sync group's own status: repo.getSyncStatuses() covers its
-    // replica pairs (local primary ↔ each config backend).
-    syncSection.appendChild(this.buildStatusRow(
-      () => (this.repo ? { statuses: this.repo.getSyncStatuses(), failed: [] } : null),
-    ));
+    const list = el('div', { className: 'zfui-group-list' });
+    // 1) Config group (kind=config): the only card with the local primary row
+    //    and the config-specific legacy-migration block.
+    list.appendChild(this.buildGroupCard({
+      kind: 'config',
+      id: 'config',
+      name: this.configGroupName,
+      backends: this.configBackends,
+      showLocalPrimary: true,
+      // The config group's own status covers its replica pairs
+      // (local primary ↔ each config backend).
+      read: () => {
+        if (!this.repo) return null;
+        return {
+          statuses: this.repo.getSyncStatuses(),
+          failed: collectFailedBackends(this.readConfigBackendStates()),
+        };
+      },
+      readStates: () => this.readConfigBackendStates(),
+      onAddBackend: () => { void this.handleAddBackend(); },
+      onRemoveBackend: (id) => { void this.handleRemoveBackend(id); },
+      onEditBackend: (b) => this.openBackendParamEditor('config', null, b),
+      configExtras: () => this.buildLegacyAppDataNotice(),
+    }));
 
-    const list = el('ul', { className: 'zfui-backend-list' });
-    list.appendChild(this.buildLocalBackendItem());
-    for (const b of this.configBackends) {
-      list.appendChild(this.buildBackendItem(
-        b.id, b.type, b.options ?? {}, b.description, true,
-        undefined,
-        undefined,
-        () => this.openBackendParamEditor('config', null, b),
-      ));
-    }
-    syncSection.appendChild(list);
-
-    const addBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 添加后端');
-    on(addBtn, 'click', () => { void this.handleAddBackend(); });
-    syncSection.appendChild(addBtn);
-    frag.appendChild(syncSection);
-
-    if (this.legacyAppData) {
-      const legacySection = el('div', {
-        className: 'zfui-section',
-        style: 'border:1px solid #f59e0b;background:#fffbeb;padding:12px;',
-      });
-      legacySection.appendChild(el('div', { className: 'zfui-section-title' }, '⚠️ 检测到旧版遗留数据组'));
-      legacySection.appendChild(el('div', {
-        style: 'font-size:12px;color:#92400e;line-height:1.6;margin-bottom:8px',
-      }, '旧版 dir-struct-gen 自动创建的 app-data 组（后端 rs-app）仍保存在配置里。可将其后端迁移到 default 组后删除该组；只删除本地描述符，不会删除远端 app_data/folders 中的文件，上传仍可继续。'));
-      const migrateBtn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '迁移并清理');
-      let confirming = false;
-      on(migrateBtn, 'click', () => {
-        if (confirming) {
-          confirming = false;
-          migrateBtn.textContent = '迁移并清理';
-          void this.handleMigrateLegacyAppData();
-        } else {
-          confirming = true;
-          migrateBtn.textContent = '确定迁移?';
-          window.setTimeout(() => {
-            confirming = false;
-            migrateBtn.textContent = '迁移并清理';
-          }, 3000);
-        }
-      });
-      legacySection.appendChild(migrateBtn);
-      frag.appendChild(legacySection);
-    }
-
-    const dgSection = el('div', { className: 'zfui-section' });
-    dgSection.appendChild(el('div', { className: 'zfui-section-title' }, '📦 数据同步组'));
-
-    if (this.dataGroups.length === 0) {
-      dgSection.appendChild(el('div', { className: 'zfui-empty' }, '暂无数据同步组'));
-    } else {
-      for (const dg of this.dataGroups) {
-        const card = el('div', { className: 'zfui-data-group' });
-        // Card title row: display name (falls back to the stable id) plus the
-        // inline「编辑」entry. Editing only rewrites the descriptor's name.
-        const nameRow = el('div', { className: 'zfui-group-name-row' });
-        if (this.isEditingGroupName(dg.id)) {
-          nameRow.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.name || dg.id));
-          nameRow.appendChild(this.buildGroupNameEditor(dg.id, dg.name ?? '', '数据同步组名称'));
-        } else {
-          nameRow.appendChild(el('div', { className: 'zfui-data-group-name' }, dg.name || dg.id));
-          if (dg.name) {
-            nameRow.appendChild(el('span', { className: 'zfui-group-id' }, `id: ${dg.id}`));
-          }
-          const editNameBtn = el('button', {
-            className: 'zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn',
-            type: 'button',
-            title: '编辑该组的显示名称（只改描述符，不影响后端与同步）',
-          }, '编辑');
-          on(editNameBtn, 'click', () => this.startGroupNameEdit(dg.id, dg.name ?? ''));
-          nameRow.appendChild(editNameBtn);
-        }
-        card.appendChild(nameRow);
-        // Per-backend state tells us whether each *listed* descriptor actually
-        // got a sync pair (a backend whose options are invalid gets none).
-        const liveAtRender = this.groupInstances.get(dg.id);
-        const backendStates = liveAtRender?.getBackendSyncStates() ?? new Map();
+    // 2) Data groups (kind=data): same card component, data-only actions.
+    for (const dg of this.dataGroups) {
+      const live = () => this.groupInstances.get(dg.id);
+      list.appendChild(this.buildGroupCard({
+        kind: 'data',
+        id: dg.id,
+        name: dg.name ?? null,
+        backends: dg.backends,
         // Each data-group card reads its OWN live instance's status, so two
         // groups never share numbers (their sync engines are separate).
-        card.appendChild(this.buildStatusRow(
-          () => {
-            const live = this.groupInstances.get(dg.id);
-            if (!live) return null;
-            const failed = [...live.getBackendSyncStates().values()]
-              .filter((s) => s.error)
-              .map((s) => ({ id: s.backendId, message: s.error!.message }));
-            return { statuses: live.getSyncStatuses(), failed };
-          },
-          this.groupInstances.has(dg.id) ? undefined : this.groupUnavailable.get(dg.id),
-        ));
-        const dgList = el('ul', { className: 'zfui-backend-list' });
-        if (dg.backends.length === 0) {
-          dgList.appendChild(el('li', { className: 'zfui-backend-item', style: 'color:#9ca3af;font-size:12px' }, '（无后端）'));
-        } else {
-          for (const b of dg.backends) {
-            // 每个后端显示只读配置串 + 📋复制配置串；removable=true 提供删除按钮，
-            // 删除回调绑定所属数据组 id，删除的是数据组内的后端（非配置后端）。
-            // 建连失败的后端仍可删除（zen-fs-config 的 removeBackend 支持无实例描述符）。
-            dgList.appendChild(this.buildBackendItem(
-              b.id, b.type, b.options ?? {}, b.description, true,
-              () => void this.handleRemoveDataGroupBackend(dg.id, b.id),
-              backendStates.get(b.id)?.error,
-              () => this.openBackendParamEditor('data', dg.id, b),
-            ));
-          }
-        }
-        card.appendChild(dgList);
-        // Let users add more remote backends to this specific data group.
-        const addDgBackendBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 添加后端');
-        on(addDgBackendBtn, 'click', () => {
+        read: () => {
+          const group = live();
+          if (!group) return null;
+          return {
+            statuses: group.getSyncStatuses(),
+            failed: collectFailedBackends(group.getBackendSyncStates()),
+          };
+        },
+        readStates: () => live()?.getBackendSyncStates(),
+        unavailable: live() ? undefined : this.groupUnavailable.get(dg.id),
+        onAddBackend: () => {
           this.formTargetDataGroup = dg.id;
           void this.handleAddDataGroupBackend();
-        });
-        card.appendChild(addDgBackendBtn);
-        // Delete the whole data group (dispose instance + remove descriptor).
-        const removeGroupBtn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '🗑 删除组');
-        let confirmingGroup = false;
-        on(removeGroupBtn, 'click', () => {
-          if (confirmingGroup) {
-            confirmingGroup = false;
-            removeGroupBtn.textContent = '🗑 删除组';
-            void this.handleRemoveDataGroup(dg.id);
-          } else {
-            confirmingGroup = true;
-            removeGroupBtn.textContent = '确定?';
-            window.setTimeout(() => {
-              confirmingGroup = false;
-              removeGroupBtn.textContent = '🗑 删除组';
-            }, 3000);
-          }
-        });
-        card.appendChild(removeGroupBtn);
-        dgSection.appendChild(card);
-      }
+        },
+        onRemoveBackend: (id) => { void this.handleRemoveDataGroupBackend(dg.id, id); },
+        onEditBackend: (b) => this.openBackendParamEditor('data', dg.id, b),
+        onRemoveGroup: () => { void this.handleRemoveDataGroup(dg.id); },
+      }));
     }
 
-    const addDgBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 新增数据同步组');
-    on(addDgBtn, 'click', () => { void this.handleAddDataGroup(); });
-    dgSection.appendChild(addDgBtn);
-    frag.appendChild(dgSection);
-
-    return frag as unknown as HTMLElement;
-  }
-
-  private buildDataSyncView(): HTMLElement {
-    const section = el('div', { className: 'zfui-section' });
-    section.appendChild(el('div', { className: 'zfui-section-title' }, '🔗 同步后端'));
-    // Standalone data-sync group: its own sync engine's status.
-    section.appendChild(this.buildStatusRow(
-      () => (this.dataGroup ? { statuses: this.dataGroup.getSyncStatuses(), failed: [] } : null),
-    ));
-
-    const list = el('ul', { className: 'zfui-backend-list' });
-    list.appendChild(this.buildLocalBackendItem());
-    for (const b of this.dataBackends) {
-      list.appendChild(this.buildBackendItem(
-        b.id, b.type, b.options ?? {}, b.description, true,
-        undefined,
-        undefined,
-        () => this.openBackendParamEditor('data', this.dataGroup?.groupId ?? 'default', b),
-      ));
+    if (this.dataGroups.length === 0) {
+      list.appendChild(el('div', { className: 'zfui-empty' }, '暂无数据同步组'));
     }
     section.appendChild(list);
 
-    const addBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 添加后端');
-    on(addBtn, 'click', () => { void this.handleAddBackend(); });
-    section.appendChild(addBtn);
+    const addDgBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 新增数据同步组');
+    on(addDgBtn, 'click', () => { void this.handleAddDataGroup(); });
+    section.appendChild(addDgBtn);
 
     return section;
+  }
+
+  /** Standalone data-sync group rendered through the same card component. */
+  private buildDataSyncView(): HTMLElement {
+    const section = el('div', { className: 'zfui-section' });
+    section.appendChild(el('div', { className: 'zfui-section-title' }, '🔗 数据同步组'));
+
+    const group = this.dataGroup;
+    const list = el('div', { className: 'zfui-group-list' });
+    list.appendChild(this.buildGroupCard({
+      kind: 'data',
+      id: group?.groupId ?? 'default',
+      name: null,
+      backends: this.dataBackends,
+      read: () => (group
+        ? {
+            statuses: group.getSyncStatuses(),
+            failed: collectFailedBackends(group.getBackendSyncStates()),
+          }
+        : null),
+      readStates: () => group?.getBackendSyncStates(),
+      onAddBackend: () => { void this.handleAddBackend(); },
+      onRemoveBackend: (id) => { void this.handleRemoveBackend(id); },
+      onEditBackend: (b) => this.openBackendParamEditor('data', group?.groupId ?? 'default', b),
+    }));
+    section.appendChild(list);
+
+    return section;
+  }
+
+  /** Read the config repo's per-backend state when the core provides it. */
+  private readConfigBackendStates(): Map<string, BackendSyncState> | undefined {
+    return (this.repo as RepoWithBackendSyncState | null)?.getBackendSyncStates?.();
+  }
+
+  /**
+   * One card for any sync group. Shared parts — kind badge, display name +
+   * inline rename, unified status line, backend rows with failure labels,
+   * add/remove actions — are always rendered; `kind` only adds the
+   * config-specific block and the data-group delete action.
+   */
+  private buildGroupCard(spec: GroupCardSpec): HTMLElement {
+    const isConfig = spec.kind === 'config';
+    const card = el('div', { className: `zfui-group-card zfui-group-card-${spec.kind}` });
+
+    const nameRow = el('div', { className: 'zfui-group-name-row' });
+    nameRow.appendChild(el('span', {
+      className: `zfui-badge zfui-group-kind zfui-group-kind-${spec.kind}`,
+    }, isConfig ? '⚙ 配置组' : '📦 数据组'));
+    const fallbackName = isConfig ? '配置同步组' : spec.id;
+    if (this.isEditingGroupName(spec.id)) {
+      nameRow.appendChild(el('div', { className: 'zfui-group-card-name' }, spec.name || fallbackName));
+      nameRow.appendChild(this.buildGroupNameEditor(
+        spec.id,
+        spec.name ?? '',
+        isConfig ? '配置同步组名称' : '数据同步组名称',
+      ));
+    } else {
+      nameRow.appendChild(el('div', { className: 'zfui-group-card-name' }, spec.name || fallbackName));
+      if (spec.name) nameRow.appendChild(el('span', { className: 'zfui-group-id' }, `id: ${spec.id}`));
+      const editNameBtn = el('button', {
+        className: 'zfui-btn zfui-btn-secondary zfui-btn-sm zfui-group-name-btn',
+        type: 'button',
+        title: '编辑该组的显示名称（只改描述符，不影响后端与同步）',
+      }, '编辑');
+      on(editNameBtn, 'click', () => this.startGroupNameEdit(spec.id, spec.name ?? ''));
+      nameRow.appendChild(editNameBtn);
+    }
+    card.appendChild(nameRow);
+    card.appendChild(el('div', { className: 'zfui-group-kind-hint' },
+      isConfig
+        ? '承载配置与元数据：nodes / shared / .config / .meta'
+        : '承载本组应用数据；.meta 仅保存墓碑、版本与冲突'));
+
+    // Unified status line: pair counts plus every descriptor that failed to
+    // connect (a failed backend has no pair and would otherwise be invisible).
+    card.appendChild(this.buildStatusRow(spec.read, spec.unavailable));
+
+    const states = spec.readStates?.();
+    const list = el('ul', { className: 'zfui-backend-list' });
+    if (spec.showLocalPrimary) list.appendChild(this.buildLocalBackendItem());
+    if (spec.backends.length === 0) {
+      list.appendChild(el('li', {
+        className: 'zfui-backend-item',
+        style: 'color:#9ca3af;font-size:12px',
+      }, '（无后端）'));
+    } else {
+      for (const b of spec.backends) {
+        // Per-backend state tells us whether each *listed* descriptor actually
+        // got a sync pair (a backend whose options are invalid gets none).
+        list.appendChild(this.buildBackendItem(
+          b.id, b.type, b.options ?? {}, b.description, true,
+          spec.onRemoveBackend ? () => spec.onRemoveBackend!(b.id) : undefined,
+          states?.get(b.id)?.error,
+          spec.onEditBackend ? () => spec.onEditBackend!(b) : undefined,
+        ));
+      }
+    }
+    card.appendChild(list);
+
+    if (isConfig && spec.configExtras) {
+      const extra = spec.configExtras();
+      if (extra) card.appendChild(extra);
+    }
+
+    const actions = el('div', { className: 'zfui-group-card-actions' });
+    const addBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 添加后端');
+    on(addBtn, 'click', () => spec.onAddBackend());
+    actions.appendChild(addBtn);
+
+    if (spec.onRemoveGroup) {
+      const removeGroupBtn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '🗑 删除组');
+      let confirmingGroup = false;
+      on(removeGroupBtn, 'click', () => {
+        if (confirmingGroup) {
+          confirmingGroup = false;
+          removeGroupBtn.textContent = '🗑 删除组';
+          spec.onRemoveGroup!();
+        } else {
+          confirmingGroup = true;
+          removeGroupBtn.textContent = '确定?';
+          window.setTimeout(() => {
+            confirmingGroup = false;
+            removeGroupBtn.textContent = '🗑 删除组';
+          }, 3000);
+        }
+      });
+      actions.appendChild(removeGroupBtn);
+    }
+    card.appendChild(actions);
+
+    return card;
+  }
+
+  /** Legacy `app-data` notice — a config-group-only block. */
+  private buildLegacyAppDataNotice(): HTMLElement | null {
+    if (!this.legacyAppData) return null;
+    const notice = el('div', {
+      className: 'zfui-group-notice',
+      style: 'border:1px solid #f59e0b;background:#fffbeb;padding:12px;border-radius:6px;margin-bottom:8px;',
+    });
+    notice.appendChild(el('div', { className: 'zfui-section-title' }, '⚠️ 检测到旧版遗留数据组'));
+    notice.appendChild(el('div', {
+      style: 'font-size:12px;color:#92400e;line-height:1.6;margin-bottom:8px',
+    }, '旧版 dir-struct-gen 自动创建的 app-data 组（后端 rs-app）仍保存在配置里。可将其后端迁移到 default 组后删除该组；只删除本地描述符，不会删除远端 app_data/folders 中的文件，上传仍可继续。'));
+    const migrateBtn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '迁移并清理');
+    let confirming = false;
+    on(migrateBtn, 'click', () => {
+      if (confirming) {
+        confirming = false;
+        migrateBtn.textContent = '迁移并清理';
+        void this.handleMigrateLegacyAppData();
+      } else {
+        confirming = true;
+        migrateBtn.textContent = '确定迁移?';
+        window.setTimeout(() => {
+          confirming = false;
+          migrateBtn.textContent = '迁移并清理';
+        }, 3000);
+      }
+    });
+    notice.appendChild(migrateBtn);
+    return notice;
   }
 
   // ── Per-group sync status ────────────────────────────────────────────
