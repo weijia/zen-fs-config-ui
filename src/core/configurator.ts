@@ -666,7 +666,16 @@ export class SyncGroupConfiguratorCore {
           await this.loadDataGroups();
           this.emit('data-group-created', { groupId: result.id, dataGroup: created });
         } else if (isGroupBackend && this.repo && this.formTargetDataGroup) {
-          await addAppDataGroupBackend(this.repo, this.formTargetDataGroup, result.id, result.type, result.options, result.description);
+          // zen-fs-config >= 0.7 treats the group's own .meta/backends/ as the
+          // authoritative list; the descriptor is only a bootstrap copy. Add
+          // through the live instance when we have one, and only fall back to
+          // the descriptor when the group is not instantiated in this session.
+          const live = this.groupInstances.get(this.formTargetDataGroup);
+          if (live) {
+            await live.addBackend(result.id, result.type, result.options, result.description);
+          } else {
+            await addAppDataGroupBackend(this.repo, this.formTargetDataGroup, result.id, result.type, result.options, result.description);
+          }
           await this.loadDataGroups();
           this.emit('backend-added', { backendId: result.id, type: result.type, groupType: 'data-sync' });
         } else if (this.mode === 'config-sync' && this.repo) {
