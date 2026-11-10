@@ -1132,11 +1132,15 @@ export class SyncGroupConfiguratorCore {
     // 2) Data groups (kind=data): same card component, data-only actions.
     for (const dg of this.dataGroups) {
       const live = () => this.groupInstances.get(dg.id);
+      const instance = live();
       list.appendChild(this.buildGroupCard({
         kind: 'data',
         id: dg.id,
         name: dg.name ?? null,
-        backends: dg.backends,
+        // The descriptor under `.config/app-data-groups/` is only a bootstrap
+        // copy and can lag behind; the group's `.meta/backends/` wins whenever
+        // the group is instantiated in this session.
+        backends: instance ? listDataBackends(instance) : dg.backends,
         // Each data-group card reads its OWN live instance's status, so two
         // groups never share numbers (their sync engines are separate).
         read: () => {

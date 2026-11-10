@@ -342,7 +342,14 @@ export async function removeDataBackend(dataGroup: AppDataGroup, id: string): Pr
 
 /**
  * List backends in a standalone data-sync group.
+ *
+ * The group's own `.meta/backends/` is the authority; `listBackends()` only
+ * reflects the backends that managed to connect in this session. Prefer the
+ * declared list so a temporarily unreachable backend still shows up.
  */
 export function listDataBackends(dataGroup: AppDataGroup): BackendDescriptor[] {
-  return dataGroup.listBackends();
+  const declared = typeof dataGroup.listDeclaredBackends === 'function'
+    ? dataGroup.listDeclaredBackends()
+    : null;
+  return declared && declared.length > 0 ? declared : dataGroup.listBackends();
 }
