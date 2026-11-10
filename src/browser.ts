@@ -19,6 +19,13 @@
  */
 import { registerBackend, listBackendMetadata, wrapZenFSFileSystem as _wrapZenFSFileSystem } from 'zen-fs-config';
 import { serializeBackend, deserializeBackend } from './core/config-string.js';
+import {
+  LOCAL_STORAGE_UNAVAILABLE_MESSAGE,
+  describeDataGroupError,
+  flushDataGroupBeforeRebuild,
+  scheduleDataGroupStorageRebuild,
+  runPendingDataGroupStorageRebuild,
+} from './core/api.js';
 import './web-component/index.js';
 
 // FileSystem-like duck-typing: enough methods for the wrapper to work.
@@ -137,4 +144,10 @@ export {
   wrapZenFSFileSystem,
   serializeBackend,
   deserializeBackend,
+  // 本地数据组存储损坏：提示文案 / 错误分类 / 重建（删库）动作
+  LOCAL_STORAGE_UNAVAILABLE_MESSAGE,
+  describeDataGroupError,
+  flushDataGroupBeforeRebuild,
+  scheduleDataGroupStorageRebuild,
+  runPendingDataGroupStorageRebuild,
 };

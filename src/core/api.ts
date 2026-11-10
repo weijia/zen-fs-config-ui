@@ -16,7 +16,11 @@ import {
   connect,
   listBackendMetadata,
   LOCAL_IDB_BACKEND_ID,
+  deleteDataGroupLocalStore,
+  dataGroupLocalStoreName,
+  isLocalStorageUnavailableError,
   type BackendMetadata,
+  type LocalStoreDeletionResult,
 } from 'zen-fs-config';
 import type { BackendInfo } from '../types.js';
 
@@ -352,4 +356,156 @@ export function listDataBackends(dataGroup: AppDataGroup): BackendDescriptor[] {
     ? dataGroup.listDeclaredBackends()
     : null;
   return declared && declared.length > 0 ? declared : dataGroup.listBackends();
+}
+
+// ── 本地数据组存储损坏：识别、提示、重建 ────────────────────────────
+
+/** 面向用户的明确提示（页面直接展示，不再降级成“没有可用的数据同步组”）。 */
+export const LOCAL_STORAGE_UNAVAILABLE_MESSAGE =
+  '本地数据组存储已损坏，需要重建：该组的浏览器 IndexedDB 记录不可读。'
+  + '重建会删除本地未同步的改动（远端数据不受影响），并从远端重新拉取。';
+
+export interface DataGroupErrorInfo {
+  kind: 'local-storage-unavailable' | 'other';
+  /** 原始错误文本（含 name/code/message，不做概括）。 */
+  message: string;
+  /** 本地存储不可用时，可重建的目标库名。 */
+  storeName?: string;
+}
+
+/** 把数据组实例化/读取错误分类：本地存储不可用必须可与普通错误区分。 */
+export function describeDataGroupError(
+  err: unknown,
+  appId: string,
+  groupId: string,
+): DataGroupErrorInfo {
+  if (isLocalStorageUnavailableError(err)) {
+    return {
+      kind: 'local-storage-unavailable',
+      message: LOCAL_STORAGE_UNAVAILABLE_MESSAGE + '\n原始错误：' + errorText(err),
+      storeName: dataGroupLocalStoreName(appId, groupId),
+    };
+  }
+  return { kind: 'other', message: errorText(err) };
+}
+
+function errorText(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { name?: string; code?: string; message?: string; cause?: unknown };
+    const head = [e.name, e.code, e.message].filter(Boolean).join(': ') || String(err);
+    return e.cause ? head + ' ← ' + errorText(e.cause) : head;
+  }
+  return String(err);
+}
+
+export interface DataGroupFlushResult {
+  attempted: boolean;
+  ok: boolean;
+  error: string | null;
+}
+
+/**
+ * 重建前尽力把能推的推上去：只有数据组当前能实例化时才可能同步。
+ * 不 dispose 已连好的组（避免在有活跃连接时删库）。
+ */
+export async function flushDataGroupBeforeRebuild(
+  repo: IConfigRepo,
+  groupId: string,
+): Promise<DataGroupFlushResult> {
+  const result: DataGroupFlushResult = { attempted: true, ok: false, error: null };
+  try {
+    const dg = await (repo as RepoWithAppDataGroups).getAppDataGroup(groupId);
+    const syncNow = (dg as unknown as { syncNow?: () => Promise<unknown> }).syncNow;
+    if (typeof syncNow !== 'function') {
+      result.error = '该数据组没有 syncNow()，跳过重建前同步';
+      return result;
+    }
+    await syncNow.call(dg);
+    result.ok = true;
+  } catch (err) {
+    result.error = errorText(err);
+  }
+  return result;
+}
+
+const REBUILD_MARKER_PREFIX = 'zen-fs-config:rebuild-data-store:';
+
+export interface PendingStoreRebuild {
+  groupId: string;
+  storeName: string;
+  requestedAt: number;
+}
+
+/**
+ * 登记“下次启动前重建该数据组本地存储”。
+ *
+ * 为什么不在当前页面直接删库：损坏的组在 init 时已经打开了 IndexedDB 连接，
+ * 同一页面 deleteDatabase 会一直 `blocked`。刷新后旧连接随页面销毁，删除才会
+ * 真正完成。页面应在挂载同步组组件**之前**调用
+ * {@link runPendingDataGroupStorageRebuild}。
+ */
+export function scheduleDataGroupStorageRebuild(
+  appId: string,
+  groupId: string,
+): PendingStoreRebuild {
+  const pending: PendingStoreRebuild = {
+    groupId,
+    storeName: dataGroupLocalStoreName(appId, groupId),
+    requestedAt: Date.now(),
+  };
+  const storage = safeLocalStorage();
+  if (!storage) throw new Error('当前环境没有 localStorage：无法登记本地存储重建');
+  storage.setItem(REBUILD_MARKER_PREFIX + appId + ':' + groupId, JSON.stringify(pending));
+  return pending;
+}
+
+export interface StoreRebuildOutcome extends PendingStoreRebuild {
+  deletion: LocalStoreDeletionResult;
+  /** 删除完成后标记已清除（下次启动只需重新连接即可从远端拉取）。 */
+  cleared: boolean;
+}
+
+/**
+ * 启动时执行已登记的本地库删除（必须在任何组件连接该数据组之前调用）。
+ * 只删本组独占库；被其它标签页占用时保留标记并如实返回 blocked。
+ */
+export async function runPendingDataGroupStorageRebuild(
+  appId: string,
+  options: { timeoutMs?: number } = {},
+): Promise<StoreRebuildOutcome[]> {
+  const storage = safeLocalStorage();
+  if (!storage) return [];
+  const prefix = REBUILD_MARKER_PREFIX + appId + ':';
+  const keys: string[] = [];
+  for (let i = 0; i < storage.length; i++) {
+    const key = storage.key(i);
+    if (key && key.startsWith(prefix)) keys.push(key);
+  }
+  const outcomes: StoreRebuildOutcome[] = [];
+  for (const key of keys) {
+    let pending: PendingStoreRebuild;
+    try {
+      pending = JSON.parse(storage.getItem(key) || '{}') as PendingStoreRebuild;
+    } catch {
+      storage.removeItem(key);
+      continue;
+    }
+    if (!pending.groupId) {
+      storage.removeItem(key);
+      continue;
+    }
+    const deletion = await deleteDataGroupLocalStore(appId, pending.groupId, options);
+    const cleared = deletion.deleted;
+    if (cleared) storage.removeItem(key);
+    outcomes.push({ ...pending, deletion, cleared });
+  }
+  return outcomes;
+}
+
+function safeLocalStorage(): Storage | null {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage : null;
+  } catch {
+    return null;
+  }
 }
