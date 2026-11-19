@@ -17,6 +17,8 @@ export interface SyncGroupConfiguratorProps {
   onBackendRemoved?: (data: CoreEventMap['backend-removed']) => void;
   onDataGroupCreated?: (data: CoreEventMap['data-group-created']) => void;
   onError?: (data: CoreEventMap['error']) => void;
+  /** Expose the underlying core instance for host apps that need a live snapshot. */
+  onCoreReady?: (core: SyncGroupConfiguratorCore | null) => void;
 }
 
 const EVENT_HANDLER_MAP: Record<string, CoreEventName> = {
@@ -40,6 +42,7 @@ export function SyncGroupConfigurator(props: SyncGroupConfiguratorProps): JSX.El
       backendInfo: props.backendInfo,
     });
     coreRef.current = core;
+    props.onCoreReady?.(core);
 
     // Attach event handlers
     for (const [propKey, eventName] of Object.entries(EVENT_HANDLER_MAP)) {
@@ -54,6 +57,7 @@ export function SyncGroupConfigurator(props: SyncGroupConfiguratorProps): JSX.El
     return () => {
       core.destroy();
       coreRef.current = null;
+      props.onCoreReady?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.appId]);

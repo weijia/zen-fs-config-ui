@@ -455,6 +455,20 @@ export class SyncGroupConfiguratorCore {
     this.listeners.clear();
   }
 
+  /**
+   * Snapshot the current live repo / dataGroup so a host app can re-resolve the
+   * data group after backend-added / data-group-created events without waiting for
+   * a fresh `connected` event. Mirrors the payload emitted by `connected`.
+   */
+  getConnection(): CoreEventMap['connected'] | null {
+    if (!this.repo && !this.dataGroup) return null;
+    return {
+      groupType: this.mode,
+      repo: this.repo ?? undefined,
+      dataGroup: this.dataGroup ?? undefined,
+    };
+  }
+
   // ── Events ───────────────────────────────────────────────────────────
 
   on<K extends CoreEventName>(name: K, listener: CoreEventListener<K>): void {
