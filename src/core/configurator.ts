@@ -217,7 +217,7 @@ export function shortInstanceId(instanceId: string | undefined): string {
   return instanceId.length > 8 ? `${instanceId.slice(0, 8)}…` : instanceId;
 }
 
-/** 一侧身份的可读串：kind · id · instanceId。 */
+/** 一侧身份的可读串：kind · id · instanceId（实例 ID 给全值，便于跨环境核对）。 */
 export function formatIdentity(
   identity: { kind?: string; id?: string; instanceId?: string } | null | undefined,
 ): string {
@@ -225,7 +225,7 @@ export function formatIdentity(
   const parts = [
     `kind=${identity.kind ?? '（无）'}`,
     `id=${identity.id ?? '（无）'}`,
-    `实例 ID=${shortInstanceId(identity.instanceId)}`,
+    `实例 ID=${identity.instanceId ?? '（无）'}`,
   ];
   return parts.join(' · ');
 }
