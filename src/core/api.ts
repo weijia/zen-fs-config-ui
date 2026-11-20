@@ -51,19 +51,35 @@ export interface RepoWithAppDataGroups extends IConfigRepo {
 
 /**
  * Connect to a sync group. Auto-detects group type from the remote backend.
- * If no backendInfo is given, falls back to local config-sync mode.
+ *
+ * 新建（远端还没有 group-type）的后端默认按 data-sync 处理 —— 这是历史约定。
+ * 但**远端已经是一个配置组**时不能因此把整个应用挡在门外：数据组本来就由
+ * 配置组托管，所以命中 `Group type mismatch … config-sync` 时退回按
+ * config-sync 连接，由配置组内部去管数据组。
  */
 export async function connectGroup(
   appId: string,
   backendInfo?: BackendInfo,
   nodeId?: string,
 ): Promise<ConnectResult> {
-  return connect(appId, {
-    backendInfo,
-    nodeId,
-    // New backends default to data-sync (per requirements).
-    groupType: 'data-sync',
-  });
+  try {
+    return await connect(appId, {
+      backendInfo,
+      nodeId,
+      // New backends default to data-sync (per requirements).
+      groupType: 'data-sync',
+    });
+  } catch (err) {
+    const message = (err as Error)?.message ?? '';
+    if (
+      backendInfo
+      && message.includes('Group type mismatch')
+      && message.includes('config-sync')
+    ) {
+      return connect(appId, { backendInfo, nodeId, groupType: 'config-sync' });
+    }
+    throw err;
+  }
 }
 
 /** Get the sync group type from a connect result. */
