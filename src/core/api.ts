@@ -19,8 +19,11 @@ import {
   deleteDataGroupLocalStore,
   dataGroupLocalStoreName,
   isLocalStorageUnavailableError,
+  purgeLocalSyncConfig,
   type BackendMetadata,
   type LocalStoreDeletionResult,
+  type PurgeLocalSyncConfigOptions,
+  type PurgeLocalSyncConfigResult,
 } from 'zen-fs-config';
 import type { BackendInfo } from '../types.js';
 
@@ -508,4 +511,44 @@ function safeLocalStorage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+/** 本页该应用的全部同步组 localStorage 标记键前缀（重建登记）。 */
+export function rebuildMarkerKeys(appId: string): string[] {
+  const storage = safeLocalStorage();
+  if (!storage) return [];
+  const prefix = REBUILD_MARKER_PREFIX + appId + ':';
+  const keys: string[] = [];
+  for (let i = 0; i < storage.length; i++) {
+    const key = storage.key(i);
+    if (key && key.startsWith(prefix)) keys.push(key);
+  }
+  return keys;
+}
+
+export interface ClearLocalSyncConfigResult extends PurgeLocalSyncConfigResult {
+  /** 删除失败（blocked / 超时）的库名，用于如实提示用户。 */
+  failed: string[];
+  /** 全部库都删掉了。 */
+  ok: boolean;
+}
+
+/**
+ * 清除本页该应用的同步组配置：配置组 + 全部数据组的 IndexedDB 本地库，
+ * 以及调用方列出的 localStorage 键（后端信息 + 重建登记）。
+ *
+ * 调用前请先 dispose 已经打开的组，否则 deleteDatabase 会一直 blocked。
+ * 远端副本不受影响。
+ */
+export async function clearLocalSyncConfig(
+  appId: string,
+  options: PurgeLocalSyncConfigOptions & { extraStorageKeys?: string[] } = {},
+): Promise<ClearLocalSyncConfigResult> {
+  const extraStorageKeys = [
+    ...(options.extraStorageKeys ?? []),
+    ...rebuildMarkerKeys(appId),
+  ];
+  const result = await purgeLocalSyncConfig(appId, { ...options, extraStorageKeys });
+  const failed = result.databases.filter((d) => !d.deleted).map((d) => d.storeName);
+  return { ...result, failed, ok: failed.length === 0 };
 }

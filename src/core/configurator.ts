@@ -43,6 +43,7 @@ import {
   updateDataGroupName,
   replaceConfigBackend,
   replaceDataGroupBackend,
+  clearLocalSyncConfig,
   type LegacyAppDataGroupMatch,
 } from './api.js';
 import { validateGroupName, GROUP_NAME_MAX_LENGTH } from './group-name.js';
@@ -160,6 +161,12 @@ export interface GroupStatusSnapshot {
   failed: FailedBackend[];
 }
 
+/** 一个因「归属别的同步组」被跳过的后端（组类型不匹配 / instanceId 不一致）。 */
+export interface SkippedBackend {
+  backendId: string;
+  reason: string;
+}
+
 /**
  * Everything one group card needs, regardless of whether it is the config
  * group or a data group. `kind` only switches the card's own sections (local
@@ -178,6 +185,11 @@ interface GroupCardSpec {
   readStates?: () => Map<string, BackendSyncState> | undefined;
   /** Reason shown when the group has no live instance in this session. */
   unavailable?: string;
+  /**
+   * 因归属别的同步组（组类型不匹配 / instanceId 不一致）而被跳过的后端。
+   * 有内容时卡片会渲染「同步边界冲突」块，并提供清除本页配置的入口。
+   */
+  readSkipped?: () => SkippedBackend[];
   /** The config group renders the implicit local primary as a read-only row. */
   showLocalPrimary?: boolean;
   onAddBackend: () => void;
@@ -1137,6 +1149,10 @@ export class SyncGroupConfiguratorCore {
         };
       },
       readStates: () => this.readConfigBackendStates(),
+      readSkipped: () => {
+        const repo = this.repo as (IConfigRepo & { listSkippedBackends?: () => SkippedBackend[] }) | null;
+        return repo?.listSkippedBackends?.() ?? [];
+      },
       onAddBackend: () => { void this.handleAddBackend(); },
       onRemoveBackend: (id) => { void this.handleRemoveBackend(id); },
       onEditBackend: (b) => this.openBackendParamEditor('config', null, b),
@@ -1167,6 +1183,7 @@ export class SyncGroupConfiguratorCore {
         },
         readStates: () => live()?.getBackendSyncStates(),
         unavailable: live() ? undefined : this.groupUnavailable.get(dg.id),
+        readSkipped: () => live()?.listSkippedBackends?.() ?? [],
         onAddBackend: () => {
           this.formTargetDataGroup = dg.id;
           void this.handleAddDataGroupBackend();
@@ -1185,6 +1202,7 @@ export class SyncGroupConfiguratorCore {
     const addDgBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '+ 新增数据同步组');
     on(addDgBtn, 'click', () => { void this.handleAddDataGroup(); });
     section.appendChild(addDgBtn);
+    section.appendChild(this.buildLocalResetBlock());
 
     return section;
   }
@@ -1210,11 +1228,13 @@ export class SyncGroupConfiguratorCore {
           }
         : null),
       readStates: () => group?.getBackendSyncStates(),
+      readSkipped: () => group?.listSkippedBackends?.() ?? [],
       onAddBackend: () => { void this.handleAddBackend(); },
       onRemoveBackend: (id) => { void this.handleRemoveBackend(id); },
       onEditBackend: (b) => this.openBackendParamEditor('data', group?.groupId ?? 'default', b),
     }));
     section.appendChild(list);
+    section.appendChild(this.buildLocalResetBlock());
 
     return section;
   }
@@ -1266,6 +1286,11 @@ export class SyncGroupConfiguratorCore {
     // Unified status line: pair counts plus every descriptor that failed to
     // connect (a failed backend has no pair and would otherwise be invisible).
     card.appendChild(this.buildStatusRow(spec.read, spec.unavailable));
+
+    const skipped = spec.readSkipped?.() ?? [];
+    if (skipped.length > 0) {
+      card.appendChild(this.buildBoundaryConflictBlock(spec.kind, spec.id, skipped));
+    }
 
     const states = spec.readStates?.();
     const list = el('ul', { className: 'zfui-backend-list' });
@@ -1321,6 +1346,140 @@ export class SyncGroupConfiguratorCore {
     card.appendChild(actions);
 
     return card;
+  }
+
+  /**
+   * 「同步边界冲突」提示：本组有后端因为远端根属于另一个同步组（组类型不匹配
+   * 或 instanceId 不一致）而被跳过。给出原因清单 + 清除本页配置的入口。
+   */
+  private buildBoundaryConflictBlock(
+    kind: 'config' | 'data',
+    groupId: string,
+    skipped: SkippedBackend[],
+  ): HTMLElement {
+    const notice = el('div', {
+      className: 'zfui-group-notice zfui-group-conflict',
+      style: 'border:1px solid #dc2626;background:#fef2f2;padding:12px;border-radius:6px;margin:8px 0;',
+    });
+    notice.appendChild(el('div', { className: 'zfui-section-title', style: 'color:#b91c1c' },
+      `⚠️ 同步边界冲突 · ${skipped.length} 个后端已跳过`));
+    notice.appendChild(el('div', {
+      style: 'font-size:12px;color:#991b1b;line-height:1.7;margin-bottom:8px',
+    }, '这些后端的远端根属于另一个同步组：组类型不匹配，或组 ID（instanceId）不一致。'
+      + '本页不会把它们和本组配对，也不会搬运或删除任何远端文件。'
+      + '如果确认要连的就是这个远端根，需要先清除本页的同步组配置（本地 IndexedDB 与后端信息），刷新后重新添加后端。'));
+
+    const list = el('ul', {
+      className: 'zfui-conflict-list',
+      style: 'margin:0 0 8px 0;padding-left:18px;font-size:12px;color:#7f1d1d;line-height:1.7',
+    });
+    for (const s of skipped) {
+      list.appendChild(el('li', {}, `${s.backendId} · ${s.reason}`));
+    }
+    notice.appendChild(list);
+
+    const btn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '🧹 清除本页同步组配置');
+    on(btn, 'click', () => {
+      void this.handleClearLocalConfig({
+        kind,
+        groupId,
+        skipped,
+      });
+    });
+    notice.appendChild(btn);
+    return notice;
+  }
+
+  /**
+   * 区块底部的「重置本页配置」入口：给没有冲突提示、但本地状态已经乱掉的页面
+   * 留一条人工出路（例如上次删除被其它标签页 blocked）。
+   */
+  private buildLocalResetBlock(): HTMLElement {
+    const wrap = el('div', {
+      className: 'zfui-local-reset',
+      style: 'margin-top:12px;padding:10px 12px;border:1px dashed #cbd5e1;border-radius:6px;'
+        + 'font-size:12px;color:#475569;line-height:1.7;',
+    });
+    wrap.appendChild(el('div', { style: 'font-weight:600;margin-bottom:4px;color:#334155' },
+      '本页配置异常？'));
+    wrap.appendChild(el('div', { style: 'margin-bottom:8px' },
+      '清除本页（当前浏览器）的同步组配置：配置组与全部数据组的本地 IndexedDB、本页保存的后端信息。'
+      + '远端副本不受影响，刷新后重新选择后端即可。'));
+    const btn = el('button', { className: 'zfui-btn zfui-btn-secondary zfui-btn-sm' }, '🧹 清除本页同步组配置');
+    on(btn, 'click', () => { void this.handleClearLocalConfig(null); });
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  /**
+   * 清除本页该应用的同步组配置。
+   *
+   * 顺序很重要：先 dispose 已打开的组（否则同页面的 deleteDatabase 会一直
+   * blocked），再删库，最后清 localStorage / sessionStorage / cookie 里的后端信息
+   * 与重建登记，然后刷新。
+   */
+  private async handleClearLocalConfig(
+    context: { kind: 'config' | 'data'; groupId: string; skipped: SkippedBackend[] } | null,
+  ): Promise<void> {
+    const appId = this.props.appId;
+    const groupIds = this.dataGroups.map((d) => d.id);
+    const lines = [
+      `将清除本页（当前浏览器）的同步组配置：`,
+      `· 配置组本地副本：zen-fs-config-config-${appId}`,
+      `· 数据组本地副本：${groupIds.length === 0 ? '（无）' : groupIds.map((id) => `zen-fs-config-data-${appId}-${id}`).join('、')}`,
+      `· 本页保存的后端信息与本地存储重建登记`,
+      '',
+      '远端 Gitee / RemoteStorage 等副本不会被删除，也不会被搬运。',
+      '清除后页面会刷新，需要重新选择或填写后端配置。',
+    ];
+    if (context) {
+      lines.push('', `触发原因：组 ${context.groupId} 有 ${context.skipped.length} 个后端与远端组边界不一致`);
+      for (const s of context.skipped) lines.push(`  · ${s.backendId}：${s.reason}`);
+    }
+    lines.push('', '确定继续？');
+    if (!window.confirm(lines.join('\n'))) return;
+
+    this.stopStatusTimer();
+    await this.disposeAllGroups();
+
+    let result;
+    try {
+      result = await clearLocalSyncConfig(appId, {
+        groupIds,
+        extraStorageKeys: [STORAGE_KEY],
+      });
+    } catch (err) {
+      window.alert(`清除失败：${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // sessionStorage / cookie 层的后端信息也一并清掉（localStorage 已由上面处理）。
+    this.clearBackendInfo();
+
+    if (!result.ok) {
+      window.alert(
+        `已删除 ${result.databases.filter((d) => d.deleted).length} 个本地库，`
+        + `但以下库删除失败（通常是被其它标签页占用）：\n${result.failed.join('\n')}\n\n`
+        + '请关闭其它打开本应用的标签页，然后刷新页面再试。',
+      );
+      return;
+    }
+    window.location.reload();
+  }
+
+  /** 断开本页所有已打开的组（删除本地库前必须做，否则会 blocked）。 */
+  private async disposeAllGroups(): Promise<void> {
+    const groups = new Set<AppDataGroup>();
+    for (const g of this.groupInstances.values()) groups.add(g);
+    if (this.dataGroup) groups.add(this.dataGroup);
+    for (const g of groups) {
+      try {
+        await g.dispose();
+      } catch (err) {
+        console.warn('[zen-fs-config-ui] dispose 失败（继续删除本地库）:', err);
+      }
+    }
+    this.groupInstances.clear();
+    this.dataGroup = null;
   }
 
   /** Legacy `app-data` notice — a config-group-only block. */
