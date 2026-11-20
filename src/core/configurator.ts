@@ -47,7 +47,12 @@ import {
   clearLocalSyncConfig,
   getBackendConflicts,
   resolveBackendConflict,
+  getIdentityCandidates,
+  isIdentityUnsettled,
+  setGroupInstanceId,
   type ConflictCapableHandle,
+  type IdentityCandidateInfo,
+  type SetGroupInstanceIdOutcome,
   type LegacyAppDataGroupMatch,
 } from './api.js';
 import { validateGroupName, GROUP_NAME_MAX_LENGTH } from './group-name.js';
@@ -1317,6 +1322,9 @@ export class SyncGroupConfiguratorCore {
       card.appendChild(this.buildBoundaryConflictBlock(spec, conflicts));
     }
 
+    const identityBlock = this.buildIdentityCandidateBlock(spec);
+    if (identityBlock) card.appendChild(identityBlock);
+
     const states = spec.readStates?.();
     const list = el('ul', { className: 'zfui-backend-list' });
     if (spec.showLocalPrimary) list.appendChild(this.buildLocalBackendItem());
@@ -1371,6 +1379,162 @@ export class SyncGroupConfiguratorCore {
     card.appendChild(actions);
 
     return card;
+  }
+
+  /**
+   * 「实例身份候选」块：把本组身份的所有来源摊开（本地 / 引导副本 / 每个远端根），
+   * 由用户决定使用哪个值。只有候选互相矛盾时才出现，绝不静默择一。
+   */
+  private buildIdentityCandidateBlock(spec: GroupCardSpec): HTMLElement | null {
+    const handle = spec.readHandle?.() ?? null;
+    const candidates = getIdentityCandidates(handle);
+    const current = handle?.getGroupInstanceId?.();
+    const unsettled = isIdentityUnsettled(handle);
+
+    // 只有一个值且没有分歧 → 不需要用户裁决，不占版面。
+    const distinct = Array.from(new Set(candidates.map((c) => c.instanceId)));
+    if (candidates.length === 0 || (!unsettled && distinct.length <= 1)) return null;
+
+    const notice = el('div', {
+      className: 'zfui-group-notice zfui-group-identity',
+      style: 'border:1px solid #f59e0b;background:#fffbeb;padding:12px;border-radius:6px;margin:8px 0;',
+    });
+    notice.appendChild(el('div', { className: 'zfui-section-title', style: 'color:#b45309' },
+      `⚠️ 实例 ID 不一致 · ${distinct.length} 个不同值，需要你决定`));
+
+    notice.appendChild(el('div', {
+      style: 'font-size:12px;color:#92400e;line-height:1.7;margin-bottom:8px',
+    }, '同一个逻辑组（kind 与 id 相同）在不同的设备/环境里各自生成过实例 ID，'
+      + '这些值散布在本地描述符、配置组的引导副本和各个远端根的 `.meta/group.json` 里。'
+      + '实例 ID 决定「谁可以同步这个远端根」，不一致会导致后端被跳过。'
+      + '下面把每个来源的原始值都列出来（不做任何自动选择）；'
+      + '由你决定本组用哪个值，改写范围也由你选。'));
+
+    // 表格：来源 / 持有者 / 完整实例 ID
+    const table = el('div', { style: 'font-size:12px;color:#78350f;line-height:1.7' });
+    for (const c of candidates) {
+      const owner = c.source === 'local'
+        ? '本机本地 .meta/group.json'
+        : c.source === 'bootstrap'
+          ? '配置组引导副本 .config/app-data-groups'
+          : `远端根 ${c.backendId ?? '?'}`;
+      const isCurrent = !!current && c.instanceId === current;
+      const row = el('div', {
+        style: `display:flex;gap:8px;flex-wrap:wrap;padding:3px 0;border-top:1px dashed #fcd34d${isCurrent ? ';font-weight:600' : ''}`,
+      });
+      row.appendChild(el('span', { style: 'min-width:150px' }, owner));
+      row.appendChild(el('span', {
+        style: 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace',
+        title: c.instanceId,
+      }, c.instanceId));
+      if (c.rootCount > 1) row.appendChild(el('span', { style: 'color:#b45309' }, `（${c.rootCount} 个根持有）`));
+      if (isCurrent) row.appendChild(el('span', { style: 'color:#059669' }, '← 本组当前使用'));
+      table.appendChild(row);
+    }
+    notice.appendChild(table);
+
+    notice.appendChild(el('div', {
+      style: 'font-size:12px;color:#92400e;line-height:1.7;margin:8px 0',
+    }, '选择某个值后：本组立即改用它；「同时统一所有根」会把本组所有 kind/id 相同的远端根一起写成该值'
+      + '（kind 或 id 不同的根一律不动，并会逐根告诉你结果）。改写远端会覆盖 `group.json`，但不动任何数据文件。'));
+
+    // 每个不同值一组按钮
+    const groups = new Map<string, IdentityCandidateInfo[]>();
+    for (const c of candidates) {
+      const list = groups.get(c.instanceId) ?? [];
+      list.push(c);
+      groups.set(c.instanceId, list);
+    }
+
+    for (const [value, owners] of groups) {
+      const rowBox = el('div', {
+        style: 'border-top:1px dashed #fcd34d;padding:8px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center',
+      });
+      rowBox.appendChild(el('div', {
+        style: 'font-size:12px;color:#78350f;flex:1 1 260px;line-height:1.6',
+      }, `${shortInstanceId(value)} · 来自 ${owners.map((c) => c.source === 'remote' ? `远端根 ${c.backendId}` : c.source === 'bootstrap' ? '引导副本' : '本地').join('、')}`));
+
+      const adoptLocal = el('button', {
+        className: 'zfui-btn zfui-btn-secondary zfui-btn-sm',
+        type: 'button',
+      }, '本组设为该值（不改远端）');
+      on(adoptLocal, 'click', () => {
+        void this.handleSetInstanceId(spec, value, false, candidates);
+      });
+      rowBox.appendChild(adoptLocal);
+
+      const adoptAll = el('button', {
+        className: 'zfui-btn zfui-btn-danger zfui-btn-sm',
+        type: 'button',
+      }, '设为该值并统一本组所有根');
+      on(adoptAll, 'click', () => {
+        void this.handleSetInstanceId(spec, value, true, candidates);
+      });
+      rowBox.appendChild(adoptAll);
+
+      if (value === current) {
+        rowBox.appendChild(el('div', { style: 'font-size:12px;color:#059669' }, '本组已在用'));
+      }
+      notice.appendChild(rowBox);
+    }
+
+    return notice;
+  }
+
+  /**
+   * 用户确认后设置本组实例 ID。确认框里列出「将写入哪里」和「会影响哪些根」，
+   * 执行后逐根汇报成功/失败（不做任何静默改写）。
+   */
+  private async handleSetInstanceId(
+    spec: GroupCardSpec,
+    instanceId: string,
+    rewriteRoots: boolean,
+    candidates: IdentityCandidateInfo[],
+  ): Promise<void> {
+    const roots = candidates.filter((c) => c.source === 'remote' && c.backendId);
+    const changedRoots = rewriteRoots
+      ? roots.filter((r) => r.instanceId !== instanceId).map((r) => `· 远端根 ${r.backendId}（${shortInstanceId(r.instanceId)} → ${shortInstanceId(instanceId)}）`)
+      : [];
+    const lines = [
+      `组：${spec.kind === 'config' ? '配置组' : '数据组'} ${spec.name || spec.id}（id=${spec.id}）`,
+      `目标实例 ID：${instanceId}`,
+      '',
+      '写入范围：',
+      '· 本机 .meta/group.json（本组的身份）',
+      '· 配置组引导副本里的 instanceId（下次重建时沿用它）',
+      rewriteRoots
+        ? (changedRoots.length > 0
+          ? '· 以下远端根会被改写：\n' + changedRoots.join('\n')
+          : '· 远端根已经是该值，不会重复写入')
+        : '· 远端根不改动（仅本组使用该值，远端不一致时对应后端仍会被跳过）',
+      '',
+      '远端改写只覆盖 .meta/group.json，不搬运、不删除任何数据文件。',
+      '确定执行吗？',
+    ];
+    const confirmFn = (msg: string) => window.confirm(msg);
+    if (!confirmFn(lines.join('\n'))) return;
+
+    const result: SetGroupInstanceIdOutcome = await setGroupInstanceId(spec.readHandle?.() ?? null, instanceId, { rewriteRoots });
+    const detail = this.formatInstanceIdOutcome(result, instanceId);
+    if (!result.ok) {
+      window.alert(detail);
+      return;
+    }
+    window.alert(`${detail}\n\n页面将刷新并重新连接。`);
+    window.location.reload();
+  }
+
+  private formatInstanceIdOutcome(result: SetGroupInstanceIdOutcome, instanceId: string): string {
+    const lines = [result.ok ? `已把本组实例 ID 设为 ${instanceId}` : `设置实例 ID 失败：${result.reason ?? '未知原因'}`];
+    if (result.roots.length > 0) {
+      lines.push('远端根结果：');
+      for (const r of result.roots) {
+        lines.push(r.ok
+          ? `✔ ${r.backendId}${r.before && r.before !== instanceId ? `（${shortInstanceId(r.before)} → ${shortInstanceId(instanceId)}）` : '（已是该值，未重复写）'}`
+          : `✘ ${r.backendId}：${r.reason ?? '未知原因'}`);
+      }
+    }
+    return lines.join('\n');
   }
 
   /**

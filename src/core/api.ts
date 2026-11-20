@@ -570,6 +570,44 @@ export interface ConflictCapableHandle {
     backendId: string,
     mode: BackendConflictResolution,
   ) => Promise<BackendConflictResolutionResult>;
+  getIdentityCandidates?: () => IdentityCandidateInfo[];
+  isIdentityUnsettled?: () => boolean;
+  setGroupInstanceId?: (
+    instanceId: string,
+    options?: { rewriteRoots?: boolean },
+  ) => Promise<SetGroupInstanceIdOutcome>;
+}
+
+/** 组实例身份的候选来源：本地描述符 / 引导副本 / 某个远端根。 */
+export type IdentityCandidateSource = 'local' | 'bootstrap' | 'remote';
+
+/**
+ * 一条身份候选（同一值可能被多个根持有，用 `rootCount` 表示）。
+ * 界面必须全部列出，由用户决定本组最终使用哪个值。
+ */
+export interface IdentityCandidateInfo {
+  source: IdentityCandidateSource;
+  /** 远端候选对应的后端 id（local / bootstrap 无此字段）。 */
+  backendId?: string;
+  instanceId: string;
+  rootCount: number;
+  kind?: 'config' | 'data';
+  id?: string;
+}
+
+/** 逐个远端根的写回结果。 */
+export interface GroupInstanceIdRootOutcome {
+  backendId: string;
+  ok: boolean;
+  before?: string;
+  reason?: string;
+}
+
+export interface SetGroupInstanceIdOutcome {
+  ok: boolean;
+  instanceId?: string;
+  reason?: string;
+  roots: GroupInstanceIdRootOutcome[];
 }
 
 /**
@@ -598,8 +636,7 @@ export function getBackendConflicts(handle: ConflictCapableHandle | null | undef
 }
 
 /** 用户确认后的身份对齐（采用远端实例身份 / 把远端改写成本组身份）。 */
-export async function resolveBackendConflict(
-  handle: ConflictCapableHandle | null | undefined,
+export async function resolveBackendConflict(  handle: ConflictCapableHandle | null | undefined,
   backendId: string,
   mode: BackendConflictResolution,
 ): Promise<BackendConflictResolutionResult> {
@@ -609,4 +646,47 @@ export async function resolveBackendConflict(
     return { mode, ok: false, reason: '当前 zen-fs-config 版本不支持身份对齐，请升级依赖' };
   }
   return fn.call(handle, backendId, mode);
+}
+
+/** 本组身份的全部候选（本地 / 引导副本 / 每个远端根），老版本库返回空数组。 */
+export function getIdentityCandidates(
+  handle: ConflictCapableHandle | null | undefined,
+): IdentityCandidateInfo[] {
+  if (!handle || typeof handle.getIdentityCandidates !== 'function') return [];
+  try {
+    return handle.getIdentityCandidates() ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** 候选是否互相矛盾（需要用户拍板）。老版本库没有该能力时按候选去重自行判断。 */
+export function isIdentityUnsettled(handle: ConflictCapableHandle | null | undefined): boolean {
+  if (!handle) return false;
+  if (typeof handle.isIdentityUnsettled === 'function') {
+    try {
+      return handle.isIdentityUnsettled();
+    } catch {
+      /* 退回按候选判断 */
+    }
+  }
+  const values = new Set(getIdentityCandidates(handle).map((c) => c.instanceId));
+  return values.size > 1;
+}
+
+/**
+ * 用户拍板后设置本组实例身份（唯一会改写远端 `group.json` 的入口）。
+ * `rewriteRoots: true` 时逐根写回并把结果如实返回给界面。
+ */
+export async function setGroupInstanceId(
+  handle: ConflictCapableHandle | null | undefined,
+  instanceId: string,
+  options: { rewriteRoots?: boolean } = {},
+): Promise<SetGroupInstanceIdOutcome> {
+  if (!handle) return { ok: false, reason: '该组没有当前会话的实例', roots: [] };
+  const fn = handle.setGroupInstanceId;
+  if (typeof fn !== 'function') {
+    return { ok: false, reason: '当前 zen-fs-config 版本不支持设置实例 ID，请升级依赖', roots: [] };
+  }
+  return fn.call(handle, instanceId, options);
 }
