@@ -11,6 +11,9 @@ import type {
   ConfigSyncGroupDescriptor,
   SyncGroupType,
   ConnectResult,
+  BackendConflictInfo,
+  BackendConflictResolution,
+  BackendConflictResolutionResult,
 } from 'zen-fs-config';
 import {
   connect,
@@ -551,4 +554,59 @@ export async function clearLocalSyncConfig(
   const result = await purgeLocalSyncConfig(appId, { ...options, extraStorageKeys });
   const failed = result.databases.filter((d) => !d.deleted).map((d) => d.storeName);
   return { ...result, failed, ok: failed.length === 0 };
+}
+
+/**
+ * 能提供「后端归属冲突」信息的句柄（结构上兼容 ConfigRepo / AppDataGroup）。
+ * 老版本库可能缺 listBackendConflicts / resolveBackendConflict，因此全部可选。
+ */
+export interface ConflictCapableHandle {
+  kind: 'config' | 'data';
+  groupId: string;
+  getGroupInstanceId?: () => string | undefined;
+  listSkippedBackends?: () => { backendId: string; reason: string }[];
+  listBackendConflicts?: () => BackendConflictInfo[];
+  resolveBackendConflict?: (
+    backendId: string,
+    mode: BackendConflictResolution,
+  ) => Promise<BackendConflictResolutionResult>;
+}
+
+/**
+ * 读取某组的后端归属冲突（两侧 kind / id / instanceId + 可执行动作）。
+ * 老版本库只提供 `listSkippedBackends()` 时降级成只有原因的结构。
+ */
+export function getBackendConflicts(handle: ConflictCapableHandle | null | undefined): BackendConflictInfo[] {
+  if (!handle) return [];
+  const structured = handle.listBackendConflicts;
+  if (typeof structured === 'function') {
+    try {
+      return structured.call(handle) ?? [];
+    } catch {
+      /* 退回 skipped 视图 */
+    }
+  }
+  const skipped = handle.listSkippedBackends?.() ?? [];
+  return skipped.map((s) => ({
+    backendId: s.backendId,
+    reason: s.reason,
+    remote: null,
+    local: { kind: handle.kind, id: handle.groupId, instanceId: handle.getGroupInstanceId?.() },
+    canAdoptRemoteInstance: false,
+    canRewriteRemoteIdentity: false,
+  }));
+}
+
+/** 用户确认后的身份对齐（采用远端实例身份 / 把远端改写成本组身份）。 */
+export async function resolveBackendConflict(
+  handle: ConflictCapableHandle | null | undefined,
+  backendId: string,
+  mode: BackendConflictResolution,
+): Promise<BackendConflictResolutionResult> {
+  if (!handle) return { mode, ok: false, reason: '该组没有当前会话的实例，无法对齐' };
+  const fn = handle.resolveBackendConflict;
+  if (typeof fn !== 'function') {
+    return { mode, ok: false, reason: '当前 zen-fs-config 版本不支持身份对齐，请升级依赖' };
+  }
+  return fn.call(handle, backendId, mode);
 }

@@ -11,6 +11,7 @@ import type {
   AppDataGroupDescriptor,
   BackendSyncState,
   SyncPairStatus,
+  BackendConflictInfo,
 } from 'zen-fs-config';
 import { localPrimaryType } from 'zen-fs-config';
 import type {
@@ -44,6 +45,9 @@ import {
   replaceConfigBackend,
   replaceDataGroupBackend,
   clearLocalSyncConfig,
+  getBackendConflicts,
+  resolveBackendConflict,
+  type ConflictCapableHandle,
   type LegacyAppDataGroupMatch,
 } from './api.js';
 import { validateGroupName, GROUP_NAME_MAX_LENGTH } from './group-name.js';
@@ -186,10 +190,12 @@ interface GroupCardSpec {
   /** Reason shown when the group has no live instance in this session. */
   unavailable?: string;
   /**
-   * 因归属别的同步组（组类型不匹配 / instanceId 不一致）而被跳过的后端。
-   * 有内容时卡片会渲染「同步边界冲突」块，并提供清除本页配置的入口。
+   * 因归属别的同步组（kind / id / instanceId 不一致）而被跳过的后端。
+   * 有内容时卡片会渲染「同步边界冲突」块：两侧身份全部展示 + 可执行的对齐动作。
    */
-  readSkipped?: () => SkippedBackend[];
+  readConflicts?: () => BackendConflictInfo[];
+  /** 冲突解决动作需要拿到本组当前的句柄。 */
+  readHandle?: () => ConflictCapableHandle | null;
   /** The config group renders the implicit local primary as a read-only row. */
   showLocalPrimary?: boolean;
   onAddBackend: () => void;
@@ -203,6 +209,25 @@ interface GroupCardSpec {
 /** Suffix shown on the status line when some descriptors have no pair. */
 export function formatBackendFailureSummary(failed: FailedBackend[]): string {
   return failed.length === 0 ? '' : ` · ${failed.length} 个后端未建立同步对`;
+}
+
+/** instanceId 太长，展示时保留前 8 位（完整值放在 title 里）。 */
+export function shortInstanceId(instanceId: string | undefined): string {
+  if (!instanceId) return '（无）';
+  return instanceId.length > 8 ? `${instanceId.slice(0, 8)}…` : instanceId;
+}
+
+/** 一侧身份的可读串：kind · id · instanceId。 */
+export function formatIdentity(
+  identity: { kind?: string; id?: string; instanceId?: string } | null | undefined,
+): string {
+  if (!identity) return '（读不到 group.json）';
+  const parts = [
+    `kind=${identity.kind ?? '（无）'}`,
+    `id=${identity.id ?? '（无）'}`,
+    `实例 ID=${shortInstanceId(identity.instanceId)}`,
+  ];
+  return parts.join(' · ');
 }
 
 /** Detail lines naming each backend that failed to connect. */
@@ -1149,10 +1174,8 @@ export class SyncGroupConfiguratorCore {
         };
       },
       readStates: () => this.readConfigBackendStates(),
-      readSkipped: () => {
-        const repo = this.repo as (IConfigRepo & { listSkippedBackends?: () => SkippedBackend[] }) | null;
-        return repo?.listSkippedBackends?.() ?? [];
-      },
+      readConflicts: () => getBackendConflicts(this.repo),
+      readHandle: () => this.repo,
       onAddBackend: () => { void this.handleAddBackend(); },
       onRemoveBackend: (id) => { void this.handleRemoveBackend(id); },
       onEditBackend: (b) => this.openBackendParamEditor('config', null, b),
@@ -1183,7 +1206,8 @@ export class SyncGroupConfiguratorCore {
         },
         readStates: () => live()?.getBackendSyncStates(),
         unavailable: live() ? undefined : this.groupUnavailable.get(dg.id),
-        readSkipped: () => live()?.listSkippedBackends?.() ?? [],
+        readConflicts: () => getBackendConflicts(live() ?? null),
+        readHandle: () => live() ?? null,
         onAddBackend: () => {
           this.formTargetDataGroup = dg.id;
           void this.handleAddDataGroupBackend();
@@ -1228,7 +1252,8 @@ export class SyncGroupConfiguratorCore {
           }
         : null),
       readStates: () => group?.getBackendSyncStates(),
-      readSkipped: () => group?.listSkippedBackends?.() ?? [],
+      readConflicts: () => getBackendConflicts(group ?? null),
+      readHandle: () => group ?? null,
       onAddBackend: () => { void this.handleAddBackend(); },
       onRemoveBackend: (id) => { void this.handleRemoveBackend(id); },
       onEditBackend: (b) => this.openBackendParamEditor('data', group?.groupId ?? 'default', b),
@@ -1287,9 +1312,9 @@ export class SyncGroupConfiguratorCore {
     // connect (a failed backend has no pair and would otherwise be invisible).
     card.appendChild(this.buildStatusRow(spec.read, spec.unavailable));
 
-    const skipped = spec.readSkipped?.() ?? [];
-    if (skipped.length > 0) {
-      card.appendChild(this.buildBoundaryConflictBlock(spec.kind, spec.id, skipped));
+    const conflicts = spec.readConflicts?.() ?? [];
+    if (conflicts.length > 0) {
+      card.appendChild(this.buildBoundaryConflictBlock(spec, conflicts));
     }
 
     const states = spec.readStates?.();
@@ -1353,41 +1378,104 @@ export class SyncGroupConfiguratorCore {
    * 或 instanceId 不一致）而被跳过。给出原因清单 + 清除本页配置的入口。
    */
   private buildBoundaryConflictBlock(
-    kind: 'config' | 'data',
-    groupId: string,
-    skipped: SkippedBackend[],
+    spec: GroupCardSpec,
+    conflicts: BackendConflictInfo[],
   ): HTMLElement {
     const notice = el('div', {
       className: 'zfui-group-notice zfui-group-conflict',
       style: 'border:1px solid #dc2626;background:#fef2f2;padding:12px;border-radius:6px;margin:8px 0;',
     });
     notice.appendChild(el('div', { className: 'zfui-section-title', style: 'color:#b91c1c' },
-      `⚠️ 同步边界冲突 · ${skipped.length} 个后端已跳过`));
+      `⚠️ 同步边界冲突 · ${conflicts.length} 个后端已跳过`));
     notice.appendChild(el('div', {
       style: 'font-size:12px;color:#991b1b;line-height:1.7;margin-bottom:8px',
-    }, '这些后端的远端根属于另一个同步组：组类型不匹配，或组 ID（instanceId）不一致。'
-      + '本页不会把它们和本组配对，也不会搬运或删除任何远端文件。'
-      + '如果确认要连的就是这个远端根，需要先清除本页的同步组配置（本地 IndexedDB 与后端信息），刷新后重新添加后端。'));
+    }, '`.meta/group.json` 里的身份决定「谁可以同步这个远端根」。判定依次看：'
+      + 'kind（config/data 组类型）→ id（组标识）→ instanceId（实例身份 UUID，每台设备/每个 origin 各自生成）。'
+      + '任一项不一致，后端就会被跳过，不会搬运或删除任何远端文件。'
+      + '下面把两侧身份全部列出；能就地对齐的给按钮（改写前会再确认一次），不能的会写明原因。'));
 
-    const list = el('ul', {
-      className: 'zfui-conflict-list',
-      style: 'margin:0 0 8px 0;padding-left:18px;font-size:12px;color:#7f1d1d;line-height:1.7',
-    });
-    for (const s of skipped) {
-      list.appendChild(el('li', {}, `${s.backendId} · ${s.reason}`));
+    for (const c of conflicts) {
+      const row = el('div', {
+        style: 'border-top:1px dashed #fca5a5;padding:8px 0;font-size:12px;color:#7f1d1d;line-height:1.7',
+      });
+      row.appendChild(el('div', { style: 'font-weight:600' }, `后端 ${c.backendId}`));
+      row.appendChild(el('div', { style: 'color:#b91c1c' }, `原因：${c.reason}`));
+      row.appendChild(el('div', {}, `远端根：${formatIdentity(c.remote)}`));
+      row.appendChild(el('div', {}, `本组：${formatIdentity(c.local)}`));
+
+      const actions = el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:6px' });
+      if (c.canAdoptRemoteInstance) {
+        const adopt = el('button', { className: 'zfui-btn zfui-btn-secondary zfui-btn-sm' },
+          '采用远端实例身份（只改本组 instanceId）');
+        on(adopt, 'click', () => {
+          void this.handleResolveConflict(spec, c, 'adopt-remote-instance');
+        });
+        actions.appendChild(adopt);
+      }
+      if (c.canRewriteRemoteIdentity) {
+        const rewrite = el('button', { className: 'zfui-btn zfui-btn-danger zfui-btn-sm' },
+          '把远端身份改写成本组（改远端 group.json）');
+        on(rewrite, 'click', () => {
+          void this.handleResolveConflict(spec, c, 'rewrite-remote-identity');
+        });
+        actions.appendChild(rewrite);
+      }
+      if (!c.canAdoptRemoteInstance && !c.canRewriteRemoteIdentity) {
+        actions.appendChild(el('div', { style: 'color:#7f1d1d' },
+          '两侧 kind 或 id 无法相互对齐（或远端身份读不完整），本页不给自动改写：'
+          + '请给本组换一个专属的远端根，或到占用该根的那个组里解除绑定。'));
+      }
+      row.appendChild(actions);
+      notice.appendChild(row);
     }
-    notice.appendChild(list);
 
+    const foot = el('div', { style: 'margin-top:8px;font-size:12px;color:#7f1d1d;line-height:1.7' },
+      '另一种做法：彻底放弃本页的本地身份，清除本页同步组配置后重新连接（会重建本地库，远端文件不动）。');
+    notice.appendChild(foot);
     const btn = el('button', { className: 'zfui-btn zfui-btn-danger' }, '🧹 清除本页同步组配置');
     on(btn, 'click', () => {
       void this.handleClearLocalConfig({
-        kind,
-        groupId,
-        skipped,
+        kind: spec.kind,
+        groupId: spec.id,
+        skipped: conflicts.map((c) => ({ backendId: c.backendId, reason: c.reason })),
       });
     });
     notice.appendChild(btn);
     return notice;
+  }
+
+  /**
+   * 用户点按钮后：把两侧身份与影响范围完整摊开并要求确认，再调用库层对齐。
+   * 采用远端身份 = 只改本组 instanceId（本地库、id、kind 都不变，无损）。
+   * 改写远端身份 = 直接把远端 `/.meta/group.json` 的 kind/id/instanceId 覆盖成本组的值。
+   */
+  private async handleResolveConflict(
+    spec: GroupCardSpec,
+    conflict: BackendConflictInfo,
+    mode: 'adopt-remote-instance' | 'rewrite-remote-identity',
+  ): Promise<void> {
+    const lines = [
+      `后端 ${conflict.backendId} 的远端根与「${spec.kind} 组 ${spec.id}」身份不一致。`,
+      '',
+      `远端根：${formatIdentity(conflict.remote)}`,
+      `本组：${formatIdentity(conflict.local)}`,
+      '',
+      mode === 'adopt-remote-instance'
+        ? '将执行：采用远端实例身份 —— 只把本组的 instanceId 改成远端的值，本地库、组 id、kind 保持不变，远端文件不改动。'
+        : '将执行：把远端 `/.meta/group.json` 的 kind / id / instanceId 覆盖成本组的值 —— 这会改写远端根的身份，'
+          + '原本认领它的那个同步组将不再能同步它（对方之后会看到同样的冲突提示）。远端文件内容不改动。',
+      '',
+      '执行后本页会刷新并重新连接该后端。确定继续？',
+    ];
+    if (!window.confirm(lines.join('\n'))) return;
+
+    const result = await resolveBackendConflict(spec.readHandle?.() ?? null, conflict.backendId, mode);
+    if (!result.ok) {
+      window.alert(`身份对齐失败，未做任何改动：\n${result.reason ?? '未知原因'}`);
+      return;
+    }
+    window.alert('已对齐身份。页面将刷新并重新连接该后端。');
+    window.location.reload();
   }
 
   /**
@@ -1599,7 +1687,10 @@ export class SyncGroupConfiguratorCore {
 
   private buildErrorView(): HTMLElement {
     const section = el('div', { className: 'zfui-section' });
-    section.appendChild(el('div', { className: 'zfui-error' }, `连接失败: ${this.error}`));
+    section.appendChild(el('div', {
+      className: 'zfui-error',
+      style: 'white-space:pre-wrap;line-height:1.7',
+    }, `连接失败: ${this.error}`));
     const actions = el('div', { className: 'zfui-error-actions' });
     const retryBtn = el('button', { className: 'zfui-btn zfui-btn-primary' }, '重试');
     on(retryBtn, 'click', () => { void this.connect(this.props.backendInfo); });
