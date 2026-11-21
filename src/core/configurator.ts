@@ -617,6 +617,18 @@ export class SyncGroupConfiguratorCore {
     this.groupUnavailable = new Map();
     for (const d of this.dataGroups) {
       if (!this.groupInstances.has(d.id)) {
+        // 描述符已登记、但本次会话没有实例：多数情况是连接时配置组还没同步完
+        // （连接与拉取的时序问题）。这里对**已存在**的描述符补载一次——
+        // 仍是「只加载、不创建」，失败才降级成「未连接」。
+        try {
+          const healed = await this.repo.getAppDataGroup(d.id);
+          if (healed) {
+            this.groupInstances.set(healed.groupId, healed);
+            continue;
+          }
+        } catch {
+          /* 仍然加载不出来：保留未连接状态与原因 */
+        }
         this.groupUnavailable.set(
           d.id,
           '该组未在当前会话实例化（连接时加载失败或仅存在于描述符中），暂无实时状态',
