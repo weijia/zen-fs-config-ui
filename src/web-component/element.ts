@@ -68,7 +68,7 @@ export class SyncGroupConfiguratorElement extends HTMLElement {
     });
 
     // Forward core events as CustomEvents
-    const eventNames: CoreEventName[] = ['connected', 'backend-added', 'backend-removed', 'data-group-created', 'error'];
+    const eventNames: CoreEventName[] = ['connected', 'backend-added', 'backend-removed', 'data-group-created', 'sync', 'error'];
     for (const name of eventNames) {
       this.core.on(name, (data) => {
         if (name === 'connected') this.lastConnected = data;

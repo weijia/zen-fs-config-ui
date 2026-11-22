@@ -165,12 +165,16 @@ zen-fs-config 支持两种同步组类型：
 | `appId` | string | 是 | 应用 ID |
 | `nodeId` | string | 否 | 节点 ID |
 | `backendInfo` | `{ type: string; options: Record<string, unknown> }` | 否 | 远程后端连接信息 |
+| `onCoreReady` | `(core: SyncGroupConfiguratorCore \| null) => void` | 否 | 拿到 core 实例，可 `core.getConnection()` 读运行中的 repo / dataGroup |
+| `onSync` | `(data: CoreEventMap['sync']) => void` | 否 | 每个同步对每轮同步触发一次 |
 
 ### 6.3 事件
 
 | 事件 | 触发时机 | 数据 |
 |---|---|---|
-| `connected` | 成功连接后端并检测组类型后 | `{ groupType, backendId }` |
+| `connected` | 成功连接后端并检测组类型后 | `{ groupType, backendId?, repo?, dataGroup?, backendInfo? }` |
 | `backend-added` | 后端添加成功 | `{ backendId, type, groupType }` |
 | `backend-removed` | 后端删除成功 | `{ backendId }` |
+| `data-group-created` | 创建 data-sync 组后 | `{ groupId, dataGroup? }` |
+| `sync` | 每个同步对每轮同步结束 / 失败（含零变更轮） | `{ type, groupKind, groupId, backendId, pairId, timestamp, result?, error? }` |
 | `error` | 发生错误 | `{ message }` |

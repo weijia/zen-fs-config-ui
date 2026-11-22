@@ -145,6 +145,12 @@ core.on('connected', (data) => {
 });
 ```
 
+`sync` 事件不来自控件自身逻辑，而是 Core 侧的 `subscribeSyncEvents()` 把 `zen-fs-config` 的
+`repo.onSyncEvent()` / `dataGroup.onSyncEvent()` 桥接成 Core 事件后再由元素转发：连接成功时订阅
+`repo` 与所有数据组，`data-group-created` 时订阅新建组，`destroy()` 与下一次 `connect()` 前统一退订。
+收到事件后控件立即刷新状态行（不等 2 秒轮询）。旧版 `zen-fs-config` 没有 `onSyncEvent` 时不注册监听，
+事件自然不触发，其余功能不受影响。
+
 ## 4. React 层设计
 
 ### 4.1 组件
@@ -180,6 +186,7 @@ React 组件通过 props 接收事件回调，Core 层调用回调：
   appId="my-app"
   onConnected={(data) => console.log(data)}
   onBackendAdded={(data) => console.log(data)}
+  onSync={(data) => console.log(data.type, data.backendId, data.result)}
 />
 ```
 

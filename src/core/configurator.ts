@@ -59,6 +59,7 @@ import { validateGroupName, GROUP_NAME_MAX_LENGTH } from './group-name.js';
 import { el, on, clear } from './render.js';
 import { STYLES } from './styles.js';
 import { openBackendForm } from './views/backend-form.js';
+import { openInitConfirm } from './views/init-confirm.js';
 import { serializeBackend } from './config-string.js';
 
 /** UI version — injected by tsup from package.json at build time. */
@@ -168,6 +169,17 @@ export function collectFailedBackends(
 export interface GroupStatusSnapshot {
   statuses: Map<string, SyncPairStatus>;
   failed: FailedBackend[];
+  /** 后台建对尚未完成：UI 不能把「0 个同步对」当成「没有远端」。 */
+  pending?: boolean;
+  /** 建对结束后的结果摘要（就绪/跳过/失败计数，或后台异常）。 */
+  replicaNote?: string;
+}
+
+/** `connect()` 结果里 defer 模式的副本就绪回执（库侧类型：ReplicaSetupSummary）。 */
+export interface ReplicaSetupSummaryLike {
+  ready: string[];
+  skipped: { backendId: string; reason: string }[];
+  failed: { backendId: string; error: unknown }[];
 }
 
 /** 一个因「归属别的同步组」被跳过的后端（组类型不匹配 / instanceId 不一致）。 */
@@ -216,6 +228,26 @@ export function formatBackendFailureSummary(failed: FailedBackend[]): string {
   return failed.length === 0 ? '' : ` · ${failed.length} 个后端未建立同步对`;
 }
 
+/** 后台建对结果的一行摘要；没有结果（未开 defer / 尚未结束）时返回 undefined。 */
+export function formatReplicaSetupNote(
+  summary: ReplicaSetupSummaryLike | null,
+  error: string | null,
+): string | undefined {
+  if (error) return `后台建对失败 · ${error.slice(0, 160)}`;
+  if (!summary) return undefined;
+  const parts = [`后台建对 就绪 ${summary.ready.length}`];
+  if (summary.skipped.length > 0) {
+    const reasons = summary.skipped
+      .map((s) => `${s.backendId}: ${String(s.reason).slice(0, 100)}`)
+      .join('；');
+    parts.push(`跳过 ${summary.skipped.length}（${reasons}）`);
+  }
+  if (summary.failed.length > 0) {
+    parts.push(`失败 ${summary.failed.length}（${summary.failed.map((f) => f.backendId).join('、')}）`);
+  }
+  return parts.join(' · ');
+}
+
 /** instanceId 太长，展示时保留前 8 位（完整值放在 title 里）。 */
 export function shortInstanceId(instanceId: string | undefined): string {
   if (!instanceId) return '（无）';
@@ -250,6 +282,24 @@ interface StatusRowRef {
   unavailable?: string;
 }
 
+/**
+ * 订阅一个组实例的同步对事件（`zen-fs-config` 的 `onSyncEvent`）。
+ * 老版本库没有该方法时返回 null（调用方静默跳过，行为与之前一致）。
+ * 独立成函数是为了能脱离 DOM 单测。
+ */
+export function subscribeGroupSyncEvents(
+  group: unknown,
+  onEvent: (event: CoreEventMap['sync']) => void,
+): (() => void) | null {
+  if (!group || typeof group !== 'object') return null;
+  const withEvents = group as {
+    onSyncEvent?: (handler: (event: CoreEventMap['sync']) => void) => () => void;
+  };
+  if (typeof withEvents.onSyncEvent !== 'function') return null;
+  const unsubscribe = withEvents.onSyncEvent(onEvent);
+  return typeof unsubscribe === 'function' ? unsubscribe : () => { /* no-op */ };
+}
+
 export class SyncGroupConfiguratorCore {
   private container: HTMLElement;
   private props: CoreProps;
@@ -262,6 +312,10 @@ export class SyncGroupConfiguratorCore {
 
   private repo: IConfigRepo | null = null;
   private dataGroup: AppDataGroup | null = null;
+  /** 同步对事件（repo + 每个数据组）的取消订阅函数。 */
+  private syncEventUnsubscribers: Array<() => void> = [];
+  /** 已挂过事件的组实例，避免同一实例重复订阅。 */
+  private syncEventGroups = new WeakSet<object>();
 
   private configBackends: BackendDescriptor[] = [];
   private dataGroups: AppDataGroupDescriptor[] = [];
@@ -287,6 +341,11 @@ export class SyncGroupConfiguratorCore {
   private groupUnavailable: Map<string, string> = new Map();
   private statusRefs: StatusRowRef[] = [];
   private statusTimer: number | null = null;
+  /** connect() 已返回、副本仍在后台校验/建对。 */
+  private replicasPending = false;
+  private replicaReadyPromise: Promise<ReplicaSetupSummaryLike> | null = null;
+  private replicaSummary: ReplicaSetupSummaryLike | null = null;
+  private replicaError: string | null = null;
   /** Legacy `app-data` group created by older dir-struct-gen versions. */
   private legacyAppData: LegacyAppDataGroupMatch | null = null;
 
@@ -492,6 +551,7 @@ export class SyncGroupConfiguratorCore {
   destroy(): void {
     this.destroyed = true;
     this.stopStatusTimer();
+    this.clearSyncEventSubscriptions();
     clear(this.container);
     if (this.styleEl) this.styleEl.remove();
     this.listeners.clear();
@@ -512,6 +572,32 @@ export class SyncGroupConfiguratorCore {
   }
 
   // ── Events ───────────────────────────────────────────────────────────
+
+  /**
+   * 订阅一个组实例的同步对事件（`zen-fs-config` 的 `onSyncEvent`）。
+   * 老版本库没有该方法时静默跳过，行为与之前一致。
+   */
+  private subscribeSyncEvents(group: unknown): void {
+    if (!group || typeof group !== 'object') return;
+    if (this.syncEventGroups.has(group as object)) return;
+    const unsubscribe = subscribeGroupSyncEvents(group, (event) => {
+      if (this.destroyed) return;
+      this.emit('sync', event);
+      // 事件到达即刷新状态行，不必等 2 秒轮询。
+      this.updateStatusRows();
+    });
+    if (!unsubscribe) return;
+    this.syncEventGroups.add(group as object);
+    this.syncEventUnsubscribers.push(unsubscribe);
+  }
+
+  private clearSyncEventSubscriptions(): void {
+    for (const unsubscribe of this.syncEventUnsubscribers) {
+      try { unsubscribe(); } catch { /* ignore */ }
+    }
+    this.syncEventUnsubscribers = [];
+    this.syncEventGroups = new WeakSet<object>();
+  }
 
   on<K extends CoreEventName>(name: K, listener: CoreEventListener<K>): void {
     if (!this.listeners.has(name)) this.listeners.set(name, new Set());
@@ -535,10 +621,42 @@ export class SyncGroupConfiguratorCore {
       this.connecting = true;
     }
     this.error = null;
+    this.replicasPending = false;
+    this.replicaSummary = null;
+    this.replicaReadyPromise = null;
+    this.replicaError = null;
+    this.clearSyncEventSubscriptions();
     this.render();
 
     try {
-      const result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId);
+      let result: Awaited<ReturnType<typeof connectGroup>>;
+      try {
+        result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId, {
+          deferReplicaSetup: true,
+        });
+      } catch (err) {
+        // 空库：必须由用户决定初始化成哪种组，代码不猜（§3.1.1）。
+        const needsInit = (err as { code?: string })?.code === 'NEEDS_INIT';
+        if (!needsInit || !backendInfo || isBackground) throw err;
+        const choice = await openInitConfirm({ backendType: backendInfo.type });
+        if (!choice) throw err;
+        result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId, {
+          initGroupType: choice,
+          deferReplicaSetup: true,
+        });
+      }
+
+      // 新库的 defer 模式：connect 先返回（信号①），副本随后在后台校验建对。
+      // 旧 npm 版没有这两个字段，取值一律按可选处理。
+      const widened = result as typeof result & {
+        replicasPending?: boolean;
+        whenReplicasReady?: Promise<ReplicaSetupSummaryLike>;
+      };
+      this.replicasPending = widened.replicasPending === true;
+      this.replicaSummary = null;
+      this.replicaReadyPromise = this.replicasPending
+        ? (widened.whenReplicasReady ?? null)
+        : null;
 
       // Capture the live group instances that connect() already loaded. The UI
       // never instantiates a group on its own — missing groups render as
@@ -546,14 +664,19 @@ export class SyncGroupConfiguratorCore {
       this.groupInstances = new Map();
       this.groupUnavailable = new Map();
       for (const g of result.appDataGroups ?? []) {
-        if (g) this.groupInstances.set(g.groupId, g);
+        if (g) {
+          this.groupInstances.set(g.groupId, g);
+          this.subscribeSyncEvents(g);
+        }
       }
       if (result.dataGroup) {
         this.groupInstances.set(result.dataGroup.groupId, result.dataGroup);
+        this.subscribeSyncEvents(result.dataGroup);
       }
 
       if (result.repo) {
         this.repo = result.repo;
+        this.subscribeSyncEvents(result.repo);
         this.mode = 'config-sync';
         await this.loadConfigBackends();
         await this.loadDataGroups();
@@ -575,6 +698,9 @@ export class SyncGroupConfiguratorCore {
         dataGroup: this.dataGroup ?? undefined,
         backendInfo: backendInfo ?? this.props.backendInfo ?? undefined,
       });
+
+      // 信号②：后台建对完成后把状态行从「远端校验中」切回真实计数。
+      if (this.replicasPending) void this.awaitReplicasReady();
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
       if (backendInfo && !isBackground) this.clearBackendInfo();
@@ -584,6 +710,35 @@ export class SyncGroupConfiguratorCore {
       this.backgroundConnecting = false;
       this.render();
     }
+  }
+
+  /**
+   * 信号②：等待后台「校验 → 建对」完成。connect() 早已返回，这里只是刷新
+   * 状态行；失败也不会把整个面板切到错误页 —— 本地配置照常可用。
+   */
+  private async awaitReplicasReady(): Promise<void> {
+    const pending = this.replicaReadyPromise;
+    if (!pending) {
+      this.replicasPending = false;
+      this.updateStatusRows();
+      return;
+    }
+    let summary: ReplicaSetupSummaryLike | null = null;
+    let failure: string | null = null;
+    try {
+      summary = await pending;
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    }
+    if (this.destroyed) return;
+    this.replicaSummary = summary;
+    this.replicaError = failure;
+    this.replicasPending = false;
+    this.replicaReadyPromise = null;
+    this.updateStatusRows();
+    // 有打开的表单时不要整页重建，避免打断输入；否则重渲染一次让后端行
+    // 的「未连接」标签随真实 pair 一起更新。
+    if (!this.formContainer) this.render();
   }
 
   private async loadConfigBackends(): Promise<void> {
@@ -731,6 +886,7 @@ export class SyncGroupConfiguratorCore {
             description: result.description,
           }]);
           this.groupInstances.set(created.groupId, created);
+          this.subscribeSyncEvents(created);
           await this.loadDataGroups();
           this.emit('data-group-created', { groupId: result.id, dataGroup: created });
         } else if (isGroupBackend && this.repo && this.formTargetDataGroup) {
@@ -1188,6 +1344,11 @@ export class SyncGroupConfiguratorCore {
         return {
           statuses: this.repo.getSyncStatuses(),
           failed: collectFailedBackends(this.readConfigBackendStates()),
+          pending: this.replicasPending,
+          replicaNote: this.replicasPending ? undefined : formatReplicaSetupNote(
+            this.replicaSummary,
+            this.replicaError,
+          ),
         };
       },
       readStates: () => this.readConfigBackendStates(),
@@ -1832,6 +1993,13 @@ export class SyncGroupConfiguratorCore {
         ref.detailEl.textContent = '';
         continue;
       }
+      if (snapshot.pending) {
+        // 信号①已到、信号②未到：明确说明「本地可用、远端在校验」。
+        ref.textEl.textContent = '远端校验中 · connect 已返回，副本尚未建对';
+        ref.textEl.parentElement?.classList.remove('err');
+        ref.detailEl.textContent = '本地配置可正常读写；后台完成远端身份校验后再建同步对。';
+        continue;
+      }
       const { text, error } = formatSyncStatuses(snapshot.statuses);
       const failed = snapshot.failed;
       // A backend that failed to connect has no pair, so the pair count alone
@@ -1843,6 +2011,7 @@ export class SyncGroupConfiguratorCore {
       }
       ref.textEl.textContent = text + formatBackendFailureSummary(failed);
       const detailParts: string[] = [];
+      if (snapshot.replicaNote) detailParts.push(snapshot.replicaNote);
       if (failed.length > 0) detailParts.push(formatBackendFailureDetail(failed));
       if (error) detailParts.push(`最后错误 ${fmtClock(error.timestamp)} · ${String(error.message).slice(0, 120)}`);
       ref.detailEl.textContent = detailParts.join('\n');

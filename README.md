@@ -9,7 +9,7 @@ It lets users manage **config-sync** and **data-sync** backends through a graphi
 - **Unified backend form** — one form for all backend types; fields are generated dynamically from `zen-fs-config` backend metadata.
 - **Inline form (no popup)** — the backend form renders inline below the backend list, not in a modal dialog.
 - **Config string import / export** — paste a `type:id:key=value,...` string to auto-fill the form; click 📋 on any backend to copy its config string.
-- **Auto group-type detection** — connects to a backend and reads `/.meta/group-type`; new backends default to `data-sync`.
+- **Group-type detection, never a guess** — connects to a remote backend and lets `zen-fs-config` probe it (`/.meta/group.json`, then the legacy `/.meta/group-type`). If the remote is a brand-new empty repo, the control asks the user whether to initialise it as `config-sync` or `data-sync`; it never assumes a type.
 - **Local-first** — always starts with a local IndexedDB primary backend (no "skip" step).
 - **Two view modes** — `config-sync` shows sync backends + data groups; `data-sync` shows sync backends only.
 - **Web Component + React** — use it in any HTML page or a React app.
@@ -300,26 +300,152 @@ The control reads the registered metadata to render the backend type selector an
 | `onBackendAdded` | `(data) => void` | no | Fired when a backend is added |
 | `onBackendRemoved` | `(data) => void` | no | Fired when a backend is removed |
 | `onDataGroupCreated` | `(data) => void` | no | Fired when a data-sync group is created |
+| `onSync` | `(data) => void` | no | Fired per sync round per pair (`sync:end` / `sync:error`) |
+| `onCoreReady` | `(core: SyncGroupConfiguratorCore \| null) => void` | no | Receives the core instance (read `core.getConnection()` for live `repo` / `dataGroup`) |
 | `onError` | `(data) => void` | no | Fired on errors |
 
 ### Events
 
 | Event | Payload |
 |---|---|
-| `connected` | `{ groupType: 'config-sync' \| 'data-sync'; backendId?: string }` |
+| `connected` | `{ groupType: 'config-sync' \| 'data-sync'; backendId?: string; repo?: IConfigRepo; dataGroup?: AppDataGroup; backendInfo?: BackendInfo }` |
 | `backend-added` | `{ backendId: string; type: string; groupType: GroupMode }` |
 | `backend-removed` | `{ backendId: string }` |
-| `data-group-created` | `{ groupId: string }` |
+| `data-group-created` | `{ groupId: string; dataGroup?: AppDataGroup }` |
+| `sync` | `{ type: 'sync:end' \| 'sync:error'; groupKind: 'config' \| 'data'; groupId: string; backendId: string; pairId: string; timestamp: number; result?: SyncResult; error?: string }` |
 | `error` | `{ message: string }` |
+
+`repo` / `dataGroup` / `backendInfo` in the `connected` payload are **live object references**
+(plain references, not clones — the event is dispatched in the same document).
+
+### Getting the live `repo` / `dataGroup`
+
+The control never exposes its instances through a property; there are two hand-offs:
+
+- **Web Component** — the element caches the last `connected` payload, so you can read it at any
+  time without racing the event: `el.getConnection()` returns the payload (or `null` before the
+  first successful connect). This matters when the control reconnects in the background after a
+  page load.
+- **React** — listen to `onConnected`, or use `onCoreReady` to receive the core instance and call
+  `core.getConnection()` later.
+
+Store the references once and keep using them — do not call `connect()` again.
+
+```js
+const el = document.querySelector('sync-group-configurator');
+
+// Preferred: read the cached payload (survives late listeners / background reconnect)
+const connection = el.getConnection();
+const { repo, dataGroup, backendInfo } = connection ?? {};
+
+// Or listen for the event
+el.addEventListener('connected', (e) => {
+  const { repo, dataGroup } = e.detail;
+  // ...
+});
+
+// 1. Live config-sync root (`repo.fs` is chrooted to /{appId}/)
+repo.getConfig('/theme');
+repo.setConfig('/theme', { color: 'dark' });
+repo.fs.promises.readFile('/data.json');
+repo.getSyncStatuses();           // live pair statuses, polled by the UI
+
+// 2. Live data-sync group (present when a data-sync backend is connected)
+dataGroup?.fs.promises.writeFile('/struct/host.json', json);
+dataGroup?.getSyncStatuses();
+```
+
+React:
+
+```tsx
+<SyncGroupConfigurator
+  appId="my-app"
+  onConnected={({ repo, dataGroup }) => {
+    // same references, same API
+  }}
+  onCoreReady={(core) => {
+    // core?.getConnection() → the same payload, readable later
+  }}
+/>
+```
+
+TypeScript users can narrow the payload with `e.detail.repo as IConfigRepo` /
+`dataGroup as AppDataGroup` (both types are exported by `zen-fs-config`). With
+`deferReplicaSetup` the repo is usable immediately, but replica pairs may still be pending — see
+the lifecycle section below.
+
+### Sync events
+
+The control forwards `zen-fs-config`'s `onSyncEvent` stream as a single DOM event called `sync`
+(React: `onSync`). It fires once per sync round per pair:
+
+```js
+el.addEventListener('sync', (e) => {
+  const { type, groupKind, groupId, backendId, pairId, result, error } = e.detail;
+
+  if (type === 'sync:error') {
+    console.warn(`同步失败 ${backendId}: ${error}`);
+    return;
+  }
+  // `sync:end` also fires for zero-change rounds — filter on result counts.
+  const changed =
+    (result?.filesCreated ?? 0) + (result?.filesUpdated ?? 0) + (result?.filesDeleted ?? 0);
+  if (changed > 0) {
+    // remote data or local data actually moved for this backend
+    console.log(`同步完成 ${backendId}: +${result.filesCreated} ~${result.filesUpdated} -${result.filesDeleted}`);
+  }
+});
+```
+
+`groupKind` is `config` or `data`; for a data group `groupId` is the group id, for config-sync it
+is `config`. The event arrives after the library has updated its status bookkeeping, and the
+control refreshes its status rows immediately instead of waiting for the 2 s timer.
+
+What it still does not do:
+
+- **Not file-level.** There is no per-path callback; it reports a whole round.
+- **Not a remote push.** Whether a round happens is still decided by the pair schedule: backends
+  with `onChange` push local writes promptly, remote changes are found on the next
+  `syncPollIntervalMs` poll (**default 30 minutes**, `zen-fs-sync`). Lower it at connect time or
+  call `repo.flush()` to pull sooner.
+- **Older `zen-fs-config` releases** have no `onSyncEvent`; the control then registers no listener
+  and the `sync` event simply never fires (everything else keeps working).
 
 ## How group-type detection works
 
 1. The control always starts with a local IndexedDB backend.
-2. When a remote backend is added (or provided via `backend-type` / `backendInfo`), it connects and reads `/.meta/group-type` from the remote.
-3. If the marker says `config-sync` → switches to the **config-sync** view (sync backends + data groups).
-4. If `data-sync` or the marker is absent (new repo) → switches to the **data-sync** view, and writes the `data-sync` marker.
+2. When a remote backend is added (or provided via `backend-type` / `backendInfo`), it calls
+   `connect()` **without** a `groupType` and lets the library probe the remote
+   (strict `/.meta/group.json`, then the legacy `/.meta/group-type`). The probe distinguishes
+   `unreachable` (→ error, nothing is created locally), `empty`, `marked` and `occupied`.
+3. Marker/descriptor says `config-sync` → **config-sync** view (sync backends + data groups);
+   `data-sync` → **data-sync** view.
+4. If the remote is a brand-new empty repo, the library throws `NEEDS_INIT`; the control opens an
+   init dialog (`views/init-confirm.ts`, three choices: 配置组 / 数据组 / cancel) and reconnects
+   with `initGroupType` set to the user's choice. Cancelling surfaces the original error — nothing
+   is written to the remote.
+5. If the remote is already a config group but the library was asked for `data-sync`, the
+   control falls back to connecting as `config-sync` instead of failing.
 
 The first remote backend's type determines the mode for the whole session.
+
+## Connection lifecycle: returned vs ready
+
+The control connects with `deferReplicaSetup: true`. `connect()` therefore returns as soon as the
+local repo is usable (signal ①), while the remote identity check and pair creation continue in the
+background and are reported by `whenReplicasReady()` (signal ②):
+
+- **Local state is live immediately** — config values can be read and written, backend descriptors
+  are listed.
+- **Replicas are not paired yet** — the config group's status line shows
+  `远端校验中 · connect 已返回，副本尚未建对`; it is deliberately *not* `同步对 0`, so an empty
+  pair list is never mistaken for "no remote".
+- **Signal ② arrives** — the status line switches back to the real counts and the detail line adds
+  `后台建对 就绪 X · 跳过 Y（backendId: reason）· 失败 Z`. Identity conflicts are reported as
+  `skipped`, not thrown.
+- **Older `zen-fs-config` releases** don't emit `replicasPending` / `whenReplicasReady`; the control
+  reads both as optional fields and keeps the previous eager behaviour (connect returns with pairs
+  already created).
 
 ## Development
 

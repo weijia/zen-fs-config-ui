@@ -38,6 +38,29 @@ export interface CoreEventMap {
   'backend-added': { backendId: string; type: string; groupType: GroupMode };
   'backend-removed': { backendId: string };
   'data-group-created': { groupId: string; dataGroup?: unknown };
+  /**
+   * 同步对完成/失败（来自 zen-fs-config 的 `onSyncEvent`）。
+   * `sync:end` 每轮都会发，包含零变更轮；用 `result` 计数过滤真实变更。
+   */
+  'sync': {
+    type: 'sync:end' | 'sync:error';
+    groupKind: 'config' | 'data';
+    groupId: string;
+    backendId: string;
+    pairId: string;
+    timestamp: number;
+    result?: {
+      filesCreated?: number;
+      filesUpdated?: number;
+      filesDeleted?: number;
+      filesSkipped?: number;
+      conflicts?: unknown[];
+      errors?: { path?: string; message: string }[];
+      durationMs?: number;
+      timestamp?: number;
+    };
+    error?: string;
+  };
   error: { message: string };
 }
 

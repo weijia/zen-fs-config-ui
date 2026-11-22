@@ -10,6 +10,7 @@ import type {
   BackendDescriptor,
   ConfigSyncGroupDescriptor,
   SyncGroupType,
+  ConnectOptions,
   ConnectResult,
   BackendConflictInfo,
   BackendConflictResolution,
@@ -52,23 +53,24 @@ export interface RepoWithAppDataGroups extends IConfigRepo {
 /**
  * Connect to a sync group. Auto-detects group type from the remote backend.
  *
- * 新建（远端还没有 group-type）的后端默认按 data-sync 处理 —— 这是历史约定。
- * 但**远端已经是一个配置组**时不能因此把整个应用挡在门外：数据组本来就由
- * 配置组托管，所以命中 `Group type mismatch … config-sync` 时退回按
- * config-sync 连接，由配置组内部去管数据组。
+ * 首次连接**不再**强行传 `groupType`：远端已有标记时按探测结果走；远端是空库时
+ * `connect()` 抛 `NeedsInitError`，由上层询问用户后，带 `groupType`（用户已做出的
+ * 显式选择）重调。命中 `Group type mismatch … config-sync` 时仍退回按 config-sync
+ * 连接，由配置组内部去管数据组。
  */
 export async function connectGroup(
   appId: string,
   backendInfo?: BackendInfo,
   nodeId?: string,
+  opts?: { initGroupType?: SyncGroupType; deferReplicaSetup?: boolean },
 ): Promise<ConnectResult> {
+  // `deferReplicaSetup` / `initGroupType` 是新增选项：本地 npm 版类型里还没有，
+  // 因此按 Record 组装后整体收窄，旧版运行时会忽略未知键。
+  const options: Record<string, unknown> = { backendInfo, nodeId };
+  if (opts?.initGroupType) options.groupType = opts.initGroupType;
+  if (opts?.deferReplicaSetup) options.deferReplicaSetup = true;
   try {
-    return await connect(appId, {
-      backendInfo,
-      nodeId,
-      // New backends default to data-sync (per requirements).
-      groupType: 'data-sync',
-    });
+    return await connect(appId, options as unknown as ConnectOptions);
   } catch (err) {
     const message = (err as Error)?.message ?? '';
     if (

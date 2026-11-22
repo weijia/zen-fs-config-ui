@@ -16,6 +16,7 @@ export interface SyncGroupConfiguratorProps {
   onBackendAdded?: (data: CoreEventMap['backend-added']) => void;
   onBackendRemoved?: (data: CoreEventMap['backend-removed']) => void;
   onDataGroupCreated?: (data: CoreEventMap['data-group-created']) => void;
+  onSync?: (data: CoreEventMap['sync']) => void;
   onError?: (data: CoreEventMap['error']) => void;
   /** Expose the underlying core instance for host apps that need a live snapshot. */
   onCoreReady?: (core: SyncGroupConfiguratorCore | null) => void;
@@ -26,6 +27,7 @@ const EVENT_HANDLER_MAP: Record<string, CoreEventName> = {
   onBackendAdded: 'backend-added',
   onBackendRemoved: 'backend-removed',
   onDataGroupCreated: 'data-group-created',
+  onSync: 'sync',
   onError: 'error',
 };
 
