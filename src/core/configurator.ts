@@ -1581,6 +1581,19 @@ export class SyncGroupConfiguratorCore {
         if (confirmingGroup) {
           confirmingGroup = false;
           removeGroupBtn.textContent = '🗑 删除组';
+          const ok = window.confirm(
+            [
+              `删除数据同步组「${spec.name ?? spec.id}」：`,
+              '',
+              '· 远端（Gitee / RemoteStorage 等）里的这份组登记会被删除，其它设备也会失去该组配置',
+              '· 组内后端的数据文件不会被搬运或删除',
+              '',
+              '只想清掉本页（当前浏览器）的配置，请用下方的「清除本页同步组配置」。',
+              '',
+              '确定继续？',
+            ].join('\n'),
+          );
+          if (!ok) return;
           spec.onRemoveGroup!();
         } else {
           confirmingGroup = true;
@@ -1898,7 +1911,9 @@ export class SyncGroupConfiguratorCore {
       `· 数据组本地副本：${groupIds.length === 0 ? '（无）' : groupIds.map((id) => `zen-fs-config-data-${appId}-${id}`).join('、')}`,
       `· 本页保存的后端信息与本地存储重建登记`,
       '',
+      '本操作会先停止本页的同步、断开所有组，再只删本地副本；',
       '远端 Gitee / RemoteStorage 等副本不会被删除，也不会被搬运。',
+      '要删除「组」本身（含远端登记）请用卡片上的「🗑 删除组」。',
       '清除后页面会刷新，需要重新选择或填写后端配置。',
     ];
     if (context) {
@@ -1935,8 +1950,24 @@ export class SyncGroupConfiguratorCore {
     window.location.reload();
   }
 
-  /** 断开本页所有已打开的组（删除本地库前必须做，否则会 blocked）。 */
+  /**
+   * 断开本页所有已打开的组（删除本地库前必须做，否则会 blocked）。
+   *
+   * 顺序（决定语义）：先停同步、再拆连接、最后才删库。
+   * 配置组的 `dispose()` 会停掉 syncEngine / watch / 待推送定时器，并等
+   * 进行中的同步结束；不先停就这么删库，同步可能仍在跑，把「本页清理」
+   * 变成「远端也跟着变」。数据组同样先 dispose 再删。
+   */
   private async disposeAllGroups(): Promise<void> {
+    this.stopStatusTimer();
+    if (this.repo) {
+      try {
+        await this.repo.dispose();
+      } catch (err) {
+        console.warn('[zen-fs-config-ui] 配置组 dispose 失败（继续删除本地库）:', err);
+      }
+      this.repo = null;
+    }
     const groups = new Set<AppDataGroup>();
     for (const g of this.groupInstances.values()) groups.add(g);
     if (this.dataGroup) groups.add(this.dataGroup);
