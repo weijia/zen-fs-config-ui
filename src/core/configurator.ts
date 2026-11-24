@@ -339,6 +339,10 @@ export class SyncGroupConfiguratorCore {
    */
   private groupInstances: Map<string, AppDataGroup> = new Map();
   private groupUnavailable: Map<string, string> = new Map();
+  /** 后台远端阶段（建实例/定身份/建对）尚未结束的数据组 id。 */
+  private pendingDataGroups: Set<string> = new Set();
+  /** 每个数据组的「远端阶段完成」promise，用于避免重复登记。 */
+  private dataGroupReady: Map<string, Promise<void>> = new Map();
   private statusRefs: StatusRowRef[] = [];
   private statusTimer: number | null = null;
   /** connect() 已返回、副本仍在后台校验/建对。 */
@@ -701,6 +705,11 @@ export class SyncGroupConfiguratorCore {
 
       // 信号②：后台建对完成后把状态行从「远端校验中」切回真实计数。
       if (this.replicasPending) void this.awaitReplicasReady();
+      // 数据组同理：每个组实例的远端阶段（建对）也放到了后台，完成后刷新状态行。
+      for (const group of this.groupInstances.values()) {
+        this.trackDataGroupPending(group);
+      }
+      if (this.dataGroup) this.trackDataGroupPending(this.dataGroup);
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
       if (backendInfo && !isBackground) this.clearBackendInfo();
@@ -716,6 +725,29 @@ export class SyncGroupConfiguratorCore {
    * 信号②：等待后台「校验 → 建对」完成。connect() 早已返回，这里只是刷新
    * 状态行；失败也不会把整个面板切到错误页 —— 本地配置照常可用。
    */
+  /**
+   * 数据组的远端阶段（建实例 / 定身份 / 建对 / 首同步）在库侧已放到后台。
+   * 这里登记它的完成信号：完成前状态行显示「远端校验中」，完成后自动刷新成
+   * 真实同步对计数，不需要用户关掉再打开面板。
+   */
+  private trackDataGroupPending(group: AppDataGroup): void {
+    if (this.destroyed) return;
+    const fn = (group as { whenBackendsReady?: () => Promise<void> }).whenBackendsReady;
+    if (typeof fn !== 'function') return;
+    const id = group.groupId;
+    const promise = fn.call(group);
+    if (this.dataGroupReady.get(id) === promise) return;
+    this.dataGroupReady.set(id, promise);
+    this.pendingDataGroups.add(id);
+    void promise
+      .catch(() => { /* 库内部已兜住，失败详情在 backendStates 里 */ })
+      .finally(() => {
+        this.dataGroupReady.delete(id);
+        this.pendingDataGroups.delete(id);
+        if (!this.destroyed) this.updateStatusRows();
+      });
+  }
+
   private async awaitReplicasReady(): Promise<void> {
     const pending = this.replicaReadyPromise;
     if (!pending) {
@@ -771,24 +803,29 @@ export class SyncGroupConfiguratorCore {
     }
     this.groupUnavailable = new Map();
     for (const d of this.dataGroups) {
-      if (!this.groupInstances.has(d.id)) {
-        // 描述符已登记、但本次会话没有实例：多数情况是连接时配置组还没同步完
-        // （连接与拉取的时序问题）。这里对**已存在**的描述符补载一次——
-        // 仍是「只加载、不创建」，失败才降级成「未连接」。
-        try {
-          const healed = await this.repo.getAppDataGroup(d.id);
-          if (healed) {
-            this.groupInstances.set(healed.groupId, healed);
-            continue;
-          }
-        } catch {
-          /* 仍然加载不出来：保留未连接状态与原因 */
-        }
-        this.groupUnavailable.set(
-          d.id,
-          '该组未在当前会话实例化（连接时加载失败或仅存在于描述符中），暂无实时状态',
-        );
+      const existing = this.groupInstances.get(d.id);
+      if (existing) {
+        // 已在会话里的实例：远端建对可能还在后台跑，先登记完成信号。
+        this.trackDataGroupPending(existing);
+        continue;
       }
+      // 描述符已登记、但本次会话没有实例：多数情况是连接时配置组还没同步完
+      // （连接与拉取的时序问题）。这里对**已存在**的描述符补载一次——
+      // 仍是「只加载、不创建」，失败才降级成「未连接」。
+      try {
+        const healed = await this.repo.getAppDataGroup(d.id);
+        if (healed) {
+          this.groupInstances.set(healed.groupId, healed);
+          this.trackDataGroupPending(healed);
+          continue;
+        }
+      } catch {
+        /* 仍然加载不出来：保留未连接状态与原因 */
+      }
+      this.groupUnavailable.set(
+        d.id,
+        '该组未在当前会话实例化（连接时加载失败或仅存在于描述符中），暂无实时状态',
+      );
     }
     this.legacyAppData = detectLegacyAppDataGroup(this.dataGroups);
   }
@@ -1238,17 +1275,22 @@ export class SyncGroupConfiguratorCore {
     this.statusRefs = [];
     clear(this.container);
 
-    if (this.connecting) {
+    // 只有「什么都没有」时才显示纯 loading：一旦本地 repo / 组 / 后端清单到位，
+    // 就把界面渲染出来，连接与后台建对只体现为顶部状态，不再挡住整块面板。
+    const hasAnyState = !!this.repo || !!this.dataGroup
+      || this.configBackends.length > 0 || this.dataBackends.length > 0
+      || this.dataGroups.length > 0;
+    if (this.connecting && !hasAnyState) {
       this.container.appendChild(el('div', { className: 'zfui-loading' }, '正在连接后端...'));
       return;
     }
 
-    if (this.backgroundConnecting && this.mode === 'initial') {
+    if (this.backgroundConnecting && this.mode === 'initial' && !hasAnyState) {
       this.container.appendChild(el('div', { className: 'zfui-loading' }, '正在恢复后端连接...'));
       return;
     }
 
-    if (this.error && this.mode === 'initial') {
+    if (this.error && this.mode === 'initial' && !hasAnyState) {
       this.container.appendChild(this.buildErrorView());
       return;
     }
@@ -1264,7 +1306,7 @@ export class SyncGroupConfiguratorCore {
       titleRow,
       el('div', { className: 'zfui-subtitle' }, this.getSubtitle()),
     ]));
-    if (this.backgroundConnecting) {
+    if (this.backgroundConnecting || this.connecting) {
       header.appendChild(el('span', {
         style: 'font-size:11px;color:#6b7280;flex-shrink:0',
       }, '⟳ 同步中...'));
@@ -1380,6 +1422,7 @@ export class SyncGroupConfiguratorCore {
           return {
             statuses: group.getSyncStatuses(),
             failed: collectFailedBackends(group.getBackendSyncStates()),
+            pending: this.pendingDataGroups.has(dg.id),
           };
         },
         readStates: () => live()?.getBackendSyncStates(),
@@ -1427,6 +1470,7 @@ export class SyncGroupConfiguratorCore {
         ? {
             statuses: group.getSyncStatuses(),
             failed: collectFailedBackends(group.getBackendSyncStates()),
+            pending: this.pendingDataGroups.has(group.groupId),
           }
         : null),
       readStates: () => group?.getBackendSyncStates(),
