@@ -12,6 +12,7 @@ import type {
   BackendSyncState,
   SyncPairStatus,
   BackendConflictInfo,
+  ConnectResult,
 } from 'zen-fs-config';
 import { localPrimaryType } from 'zen-fs-config';
 import type {
@@ -61,6 +62,13 @@ import { STYLES } from './styles.js';
 import { openBackendForm } from './views/backend-form.js';
 import { openInitConfirm } from './views/init-confirm.js';
 import { serializeBackend } from './config-string.js';
+import {
+  wrapConnectionAsAppRepo,
+  getUiConnection,
+  requireV2Api,
+  type AppRepoLike,
+  type UiConnection,
+} from './v2-api.js';
 
 /** UI version — injected by tsup from package.json at build time. */
 declare const __APP_VERSION__: string;
@@ -312,6 +320,8 @@ export class SyncGroupConfiguratorCore {
 
   private repo: IConfigRepo | null = null;
   private dataGroup: AppDataGroup | null = null;
+  /** V2 AppRepo for the current connection, if V2 was used or the host passed one. */
+  private appRepo: AppRepoLike | null = null;
   /** 同步对事件（repo + 每个数据组）的取消订阅函数。 */
   private syncEventUnsubscribers: Array<() => void> = [];
   /** 已挂过事件的组实例，避免同一实例重复订阅。 */
@@ -490,6 +500,10 @@ export class SyncGroupConfiguratorCore {
   // ── Lifecycle ────────────────────────────────────────────────────────
 
   async mount(): Promise<void> {
+    if (this.props.repo) {
+      await this.mountV2(this.props.repo);
+      return;
+    }
     this.metadata = getBackendMetadataList().filter(
       (m) => !LOCAL_BACKEND_TYPES.has(m.type),
     );
@@ -508,6 +522,64 @@ export class SyncGroupConfiguratorCore {
       } else {
         await this.connect(undefined);
       }
+    }
+  }
+
+  /**
+   * V2 mount path. With a host-provided repo it only reads the raw connection
+   * behind it; without one it calls connectV2() and lets the UI own the
+   * connection. The returned AppRepo is also emitted in the `connected`
+   * event and exposed via getAppRepo().
+   */
+  async mountV2(repo?: AppRepoLike): Promise<AppRepoLike | null> {
+    this.metadata = getBackendMetadataList().filter(
+      (m) => !LOCAL_BACKEND_TYPES.has(m.type),
+    );
+    this.connecting = true;
+    this.error = null;
+    this.replicasPending = false;
+    this.replicaSummary = null;
+    this.replicaReadyPromise = null;
+    this.replicaError = null;
+    this.clearSyncEventSubscriptions();
+    this.render();
+
+    try {
+      let appRepo: AppRepoLike;
+      let connection: UiConnection;
+      if (repo) {
+        appRepo = repo;
+        connection = getUiConnection(repo);
+      } else {
+        const api = requireV2Api();
+        // Only pass keys that are actually set: connectV2() caches by the
+        // normalized option object, and {nodeId: undefined} must normalize to
+        // exactly the same key as the host's connectV2(appId).
+        const options: {
+          nodeId?: string;
+          backendInfo?: { type: string; options: Record<string, unknown> };
+        } = {};
+        if (this.props.nodeId !== undefined) options.nodeId = this.props.nodeId;
+        if (this.props.backendInfo !== undefined) options.backendInfo = this.props.backendInfo;
+        appRepo = await api.connectV2(this.props.appId, options);
+        connection = api.getUiConnection(appRepo);
+      }
+      if (connection.appId !== this.props.appId) {
+        throw new Error(
+          `AppRepo belongs to "${connection.appId}", not "${this.props.appId}"`,
+        );
+      }
+      this.appRepo = appRepo;
+      await this.applyConnection(connection, this.props.backendInfo, appRepo);
+      return appRepo;
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : String(err);
+      this.emit('error', { message: this.error });
+      this.render();
+      return null;
+    } finally {
+      this.connecting = false;
+      this.render();
     }
   }
 
@@ -572,7 +644,22 @@ export class SyncGroupConfiguratorCore {
       groupType: this.mode,
       repo: this.repo ?? undefined,
       dataGroup: this.dataGroup ?? undefined,
+      appRepo: this.appRepo ?? undefined,
     };
+  }
+
+  /** The AppRepo associated with the current connection (V2 path), if any. */
+  getAppRepo(): AppRepoLike | null {
+    return this.appRepo;
+  }
+
+  /** Re-read config backends and data-group descriptors, then re-render. */
+  async refresh(): Promise<void> {
+    if (this.repo) {
+      await this.loadConfigBackends();
+      await this.loadDataGroups();
+    }
+    this.render();
   }
 
   // ── Events ───────────────────────────────────────────────────────────
@@ -625,6 +712,7 @@ export class SyncGroupConfiguratorCore {
       this.connecting = true;
     }
     this.error = null;
+    this.appRepo = null;
     this.replicasPending = false;
     this.replicaSummary = null;
     this.replicaReadyPromise = null;
@@ -650,66 +738,7 @@ export class SyncGroupConfiguratorCore {
         });
       }
 
-      // 新库的 defer 模式：connect 先返回（信号①），副本随后在后台校验建对。
-      // 旧 npm 版没有这两个字段，取值一律按可选处理。
-      const widened = result as typeof result & {
-        replicasPending?: boolean;
-        whenReplicasReady?: Promise<ReplicaSetupSummaryLike>;
-      };
-      this.replicasPending = widened.replicasPending === true;
-      this.replicaSummary = null;
-      this.replicaReadyPromise = this.replicasPending
-        ? (widened.whenReplicasReady ?? null)
-        : null;
-
-      // Capture the live group instances that connect() already loaded. The UI
-      // never instantiates a group on its own — missing groups render as
-      //「未连接」with the actual reason instead of fabricated numbers.
-      this.groupInstances = new Map();
-      this.groupUnavailable = new Map();
-      for (const g of result.appDataGroups ?? []) {
-        if (g) {
-          this.groupInstances.set(g.groupId, g);
-          this.subscribeSyncEvents(g);
-        }
-      }
-      if (result.dataGroup) {
-        this.groupInstances.set(result.dataGroup.groupId, result.dataGroup);
-        this.subscribeSyncEvents(result.dataGroup);
-      }
-
-      if (result.repo) {
-        this.repo = result.repo;
-        this.subscribeSyncEvents(result.repo);
-        this.mode = 'config-sync';
-        await this.loadConfigBackends();
-        await this.loadDataGroups();
-        if (backendInfo) this.saveBackendInfo(backendInfo);
-      } else if (result.dataGroup) {
-        this.dataGroup = result.dataGroup;
-        this.mode = 'data-sync';
-        // zen-fs-config reads the backend list from the remote.
-        this.dataBackends = listDataBackends(result.dataGroup);
-        if (backendInfo) this.saveBackendInfo(backendInfo);
-      }
-
-      this.emit('connected', {
-        groupType: this.mode,
-        backendId: backendInfo ? this.dataBackends[0]?.id ?? this.configBackends[0]?.id : undefined,
-        // Live object references for host apps (e.g. dir-struct-gen) to
-        // grab the data group's `fs` and manage the app's data-sync group.
-        repo: this.repo ?? undefined,
-        dataGroup: this.dataGroup ?? undefined,
-        backendInfo: backendInfo ?? this.props.backendInfo ?? undefined,
-      });
-
-      // 信号②：后台建对完成后把状态行从「远端校验中」切回真实计数。
-      if (this.replicasPending) void this.awaitReplicasReady();
-      // 数据组同理：每个组实例的远端阶段（建对）也放到了后台，完成后刷新状态行。
-      for (const group of this.groupInstances.values()) {
-        this.trackDataGroupPending(group);
-      }
-      if (this.dataGroup) this.trackDataGroupPending(this.dataGroup);
+      await this.applyConnection(result, backendInfo);
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
       if (backendInfo && !isBackground) this.clearBackendInfo();
@@ -722,9 +751,81 @@ export class SyncGroupConfiguratorCore {
   }
 
   /**
-   * 信号②：等待后台「校验 → 建对」完成。connect() 早已返回，这里只是刷新
-   * 状态行；失败也不会把整个面板切到错误页 —— 本地配置照常可用。
+   * Apply a raw config-sync connection to the UI state. Shared by the legacy
+   * connect() path and mountV2(). `appRepo` is passed by mountV2 so the exact
+   * host AppRepo is preserved; the legacy path derives one when possible.
    */
+  private async applyConnection(
+    result: ConnectResult,
+    backendInfo?: BackendInfo,
+    appRepo?: AppRepoLike,
+  ): Promise<void> {
+    // 新库的 defer 模式：connect 先返回（信号①），副本随后在后台校验建对。
+    // 旧 npm 版没有这两个字段，取值一律按可选处理。
+    const widened = result as ConnectResult & {
+      replicasPending?: boolean;
+      whenReplicasReady?: Promise<ReplicaSetupSummaryLike>;
+    };
+    this.replicasPending = widened.replicasPending === true;
+    this.replicaSummary = null;
+    this.replicaReadyPromise = this.replicasPending
+      ? (widened.whenReplicasReady ?? null)
+      : null;
+
+    // Capture the live group instances that connect() already loaded. The UI
+    // never instantiates a group on its own — missing groups render as
+    //「未连接」with the actual reason instead of fabricated numbers.
+    this.groupInstances = new Map();
+    this.groupUnavailable = new Map();
+    for (const g of result.appDataGroups ?? []) {
+      if (g) {
+        this.groupInstances.set(g.groupId, g);
+        this.subscribeSyncEvents(g);
+      }
+    }
+    if (result.dataGroup) {
+      this.groupInstances.set(result.dataGroup.groupId, result.dataGroup);
+      this.subscribeSyncEvents(result.dataGroup);
+    }
+
+    this.appRepo = appRepo
+      ?? wrapConnectionAsAppRepo({ ...result, appId: this.props.appId });
+
+    if (result.repo) {
+      this.repo = result.repo;
+      this.subscribeSyncEvents(result.repo);
+      this.mode = 'config-sync';
+      await this.loadConfigBackends();
+      await this.loadDataGroups();
+      if (backendInfo) this.saveBackendInfo(backendInfo);
+    } else if (result.dataGroup) {
+      this.dataGroup = result.dataGroup;
+      this.mode = 'data-sync';
+      // zen-fs-config reads the backend list from the remote.
+      this.dataBackends = listDataBackends(result.dataGroup);
+      if (backendInfo) this.saveBackendInfo(backendInfo);
+    }
+
+    this.emit('connected', {
+      groupType: this.mode,
+      backendId: backendInfo ? this.dataBackends[0]?.id ?? this.configBackends[0]?.id : undefined,
+      // Live object references for host apps (e.g. dir-struct-gen) to
+      // grab the data group's `fs` and manage the app's data-sync group.
+      repo: this.repo ?? undefined,
+      dataGroup: this.dataGroup ?? undefined,
+      appRepo: this.appRepo ?? undefined,
+      backendInfo: backendInfo ?? this.props.backendInfo ?? undefined,
+    });
+
+    // 信号②：后台建对完成后把状态行从「远端校验中」切回真实计数。
+    if (this.replicasPending) void this.awaitReplicasReady();
+    // 数据组同理：每个组实例的远端阶段（建对）也放到了后台，完成后刷新状态行。
+    for (const group of this.groupInstances.values()) {
+      this.trackDataGroupPending(group);
+    }
+    if (this.dataGroup) this.trackDataGroupPending(this.dataGroup);
+  }
+
   /**
    * 数据组的远端阶段（建实例 / 定身份 / 建对 / 首同步）在库侧已放到后台。
    * 这里登记它的完成信号：完成前状态行显示「远端校验中」，完成后自动刷新成

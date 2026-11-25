@@ -15,6 +15,93 @@ It lets users manage **config-sync** and **data-sync** backends through a graphi
 - **Web Component + React** — use it in any HTML page or a React app.
 - **Shadow DOM styling** — styles are isolated and won't leak into the host page.
 
+## V2 API
+
+This section describes the implemented V2 API. The legacy `SyncGroupConfigurator` / `connect` path is unchanged.
+
+The V2 UI is meant to share a single connection with `zen-fs-config`'s `connectV2`:
+
+- **`SyncGroupConfiguratorV2`** — a separate component; the existing `SyncGroupConfigurator` stays unchanged.
+- **Same result as `connectV2`** — the component does not hand back a raw `ConnectResult`; it exposes an `AppRepo` through `onRepoReady` / `core.getAppRepo()`.
+- **`repo` prop** — if the app already called `connectV2`, pass that `repo`; the UI must not connect again.
+- **No `repo` prop** — the UI calls `connectV2` itself and gives the resulting `AppRepo` back to the host.
+- **One connection per appId** — app-owned and UI-owned connections must never coexist.
+
+Usage:
+
+```tsx
+import { SyncGroupConfiguratorV2 } from 'zen-fs-config-ui/react'
+import { connectV2 } from 'zen-fs-config'
+
+const repo = await connectV2('golf')
+
+<SyncGroupConfiguratorV2
+  appId="golf"
+  repo={repo}
+  onRepoReady={(sameRepo) => {
+    // sameRepo is the same AppRepo returned by connectV2
+  }}
+/>
+```
+
+Or let the UI own the connection:
+
+```tsx
+<SyncGroupConfiguratorV2
+  appId="golf"
+  onRepoReady={async (repo) => {
+    const group = await repo.getDefaultDataGroup()
+    await group.fs.promises.writeFile('/golf/state.json', json)
+  }}
+/>
+```
+
+Web Component:
+
+```html
+<script src="https://unpkg.com/zen-fs-config-ui"></script>
+<sync-group-configurator-v2 app-id="golf"></sync-group-configurator-v2>
+<script>
+  const panel = document.querySelector('sync-group-configurator-v2')
+  panel.addEventListener('repo-ready', async (event) => {
+    const repo = event.detail
+    const group = await repo.getDefaultDataGroup()
+    console.log(group.id, group.fs)
+  })
+</script>
+```
+
+The UI will internally call `getUiConnection(appRepo)` to obtain the config repo it needs for group/back-end management. The raw repo remains internal; hosts should use `AppRepo` only.
+
+V2 also emits group-level sync events:
+
+```ts
+const unsub = group.onSyncEvent((event) => {
+  if (event.type === 'sync:start') showSyncing(event.backendId)
+  if (event.type === 'sync:progress') updateProgress(event.progress)
+  if (event.type === 'sync:end') showDone(event.result)
+  if (event.type === 'sync:error') showError(event.error)
+})
+```
+
+Multi-group selection and explicit sync use the same `AppRepo`:
+
+```ts
+const infos = await repo.listDataGroups() // [{ id, name, hasRemote }]
+const group = await repo.getDataGroup(infos[0].id)
+
+await group.flush()                     // sync this group now
+await group.deleteFile('/old.json')     // tombstone-aware delete
+```
+
+Current upstream `zen-fs-sync` provides `sync:start` / `sync:end` / `sync:error` / `conflict`; per-file `sync:progress` still needs an upstream extension. Until then, do not fake progress percentages.
+
+Compatibility:
+
+- Existing `SyncGroupConfigurator`, Web Component and React exports remain as-is.
+- Apps on the current API do not need to migrate.
+- The V2 component is additive and implemented; hosts can call `refresh()` after creating a group or changing backends.
+
 ## Installation
 
 ### NPM

@@ -15,6 +15,93 @@
 - **Web Component + React** —— 可用于任意 HTML 页面或 React 应用。
 - **Shadow DOM 样式隔离** —— 样式不会泄漏到宿主页面。
 
+## V2 API
+
+本节描述已实现的 V2 API；旧的 `SyncGroupConfigurator` / `connect` 路径保持不变。
+
+V2 UI 的目标是和 `zen-fs-config` 的 `connectV2` 共用同一个连接：
+
+- **`SyncGroupConfiguratorV2`** —— 新增独立组件，旧 `SyncGroupConfigurator` 完全不动；
+- **返回内容和 `connectV2` 一致** —— 组件不返回裸 `ConnectResult`，而是通过 `onRepoReady` / core 的 `getAppRepo()` 给出 `AppRepo`；
+- **传入 `repo`** —— 应用已经 `connectV2` 时直接传入，UI 不再连接；
+- **不传 `repo`** —— UI 自己调用 `connectV2`，把得到的 `AppRepo` 交给宿主；
+- **一个 appId 只能有一个连接** —— 应用持有和 UI 持有不能同时存在。
+
+用法：
+
+```tsx
+import { SyncGroupConfiguratorV2 } from 'zen-fs-config-ui/react'
+import { connectV2 } from 'zen-fs-config'
+
+const repo = await connectV2('golf')
+
+<SyncGroupConfiguratorV2
+  appId="golf"
+  repo={repo}
+  onRepoReady={(sameRepo) => {
+    // sameRepo 就是 connectV2 返回的同一个 AppRepo
+  }}
+/>
+```
+
+或者让 UI 持有连接：
+
+```tsx
+<SyncGroupConfiguratorV2
+  appId="golf"
+  onRepoReady={async (repo) => {
+    const group = await repo.getDefaultDataGroup()
+    await group.fs.promises.writeFile('/golf/state.json', json)
+  }}
+/>
+```
+
+Web Component：
+
+```html
+<script src="https://unpkg.com/zen-fs-config-ui"></script>
+<sync-group-configurator-v2 app-id="golf"></sync-group-configurator-v2>
+<script>
+  const panel = document.querySelector('sync-group-configurator-v2')
+  panel.addEventListener('repo-ready', async (event) => {
+    const repo = event.detail
+    const group = await repo.getDefaultDataGroup()
+    console.log(group.id, group.fs)
+  })
+</script>
+```
+
+UI 内部会通过 `getUiConnection(appRepo)` 拿到配置仓库，用于列组、建组、加/删后端。裸 `repo` 只留在 UI 内部，宿主只用 `AppRepo`。
+
+V2 同时提供数据组同步事件：
+
+```ts
+const unsub = group.onSyncEvent((event) => {
+  if (event.type === 'sync:start') showSyncing(event.backendId)
+  if (event.type === 'sync:progress') updateProgress(event.progress)
+  if (event.type === 'sync:end') showDone(event.result)
+  if (event.type === 'sync:error') showError(event.error)
+})
+```
+
+多组选择和显式同步都走同一个 `AppRepo`：
+
+```ts
+const infos = await repo.listDataGroups() // [{ id, name, hasRemote }]
+const group = await repo.getDataGroup(infos[0].id)
+
+await group.flush()                     // 立即同步这个组
+await group.deleteFile('/old.json')     // 走墓碑删除，不会被同步复活
+```
+
+当前上游 `zen-fs-sync` 提供 `sync:start` / `sync:end` / `sync:error` / `conflict`；逐文件的 `sync:progress` 还需要上游扩展。在此之前不要伪造进度百分比。
+
+兼容性：
+
+- 现有 `SyncGroupConfigurator`、Web Component、React 导出全部保持原样；
+- 当前 API 的应用不需要迁移；
+- V2 组件是增量能力，已经实现；宿主建组或改后端后可调用 `refresh()` 重新读描述符。
+
 ## 安装
 
 ### NPM

@@ -17,7 +17,14 @@
  *   </script>
  *   <sync-group-configurator app-id="my-app"></sync-group-configurator>
  */
-import { registerBackend, listBackendMetadata, wrapZenFSFileSystem as _wrapZenFSFileSystem } from 'zen-fs-config';
+import {
+  connectV2,
+  connectionToAppRepo,
+  getUiConnection,
+  registerBackend,
+  listBackendMetadata,
+  wrapZenFSFileSystem as _wrapZenFSFileSystem,
+} from 'zen-fs-config';
 import { serializeBackend, deserializeBackend } from './core/config-string.js';
 import {
   LOCAL_STORAGE_UNAVAILABLE_MESSAGE,
@@ -142,6 +149,10 @@ export {
   registerBackend,
   listBackendMetadata,
   wrapZenFSFileSystem,
+  // V2 public API (re-exported so pages can drive AppRepo/DataGroup directly)
+  connectV2,
+  connectionToAppRepo,
+  getUiConnection,
   serializeBackend,
   deserializeBackend,
   // 本地数据组存储损坏：提示文案 / 错误分类 / 重建（删库）动作

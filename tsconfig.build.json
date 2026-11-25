@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": ".types-tmp",
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": [
+    "src/index.ts",
+    "src/react/index.ts",
+    "src/web-component/index.ts",
+    "src/web-component/element-v2.ts",
+    "src/core/v2-api.ts"
+  ],
+  "exclude": ["node_modules", "dist", "src/**/__tests__/**", "src/browser.ts"]
+}

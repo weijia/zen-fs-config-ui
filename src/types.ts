@@ -16,6 +16,11 @@ export interface CoreProps {
   nodeId?: string;
   /** Optional remote backend to connect on mount. */
   backendInfo?: BackendInfo;
+  /**
+   * Optional AppRepo from connectV2(). When present, the core switches to the
+   * V2 path and does not call connect() again.
+   */
+  repo?: import('./core/v2-api.js').AppRepoLike;
 }
 
 /** Sync group mode. */
@@ -33,6 +38,8 @@ export interface CoreEventMap {
     backendId?: string;
     repo?: unknown;
     dataGroup?: unknown;
+    /** AppRepo from connectV2(), when the V2 path is active. */
+    appRepo?: unknown;
     backendInfo?: BackendInfo;
   };
   'backend-added': { backendId: string; type: string; groupType: GroupMode };
@@ -43,7 +50,7 @@ export interface CoreEventMap {
    * `sync:end` 每轮都会发，包含零变更轮；用 `result` 计数过滤真实变更。
    */
   'sync': {
-    type: 'sync:end' | 'sync:error';
+    type: 'sync:start' | 'sync:progress' | 'sync:end' | 'sync:error' | 'conflict';
     groupKind: 'config' | 'data';
     groupId: string;
     backendId: string;
@@ -60,6 +67,13 @@ export interface CoreEventMap {
       timestamp?: number;
     };
     error?: string;
+    progress?: {
+      processed: number;
+      total?: number;
+      currentPath?: string;
+      phase?: string;
+    };
+    conflict?: unknown;
   };
   error: { message: string };
 }
