@@ -1022,7 +1022,7 @@ export class SyncGroupConfiguratorCore {
             type: result.type,
             options: result.options,
             description: result.description,
-          }]);
+          }], { allowSharedRoot: true });
           this.groupInstances.set(created.groupId, created);
           this.subscribeSyncEvents(created);
           await this.loadDataGroups();
@@ -1887,6 +1887,7 @@ export class SyncGroupConfiguratorCore {
     }, '`.meta/group.json` 里的身份决定「谁可以同步这个远端根」。判定依次看：'
       + 'kind（config/data 组类型）→ id（组标识）→ instanceId（实例身份 UUID，每台设备/每个 origin 各自生成）。'
       + '任一项不一致，后端就会被跳过，不会搬运或删除任何远端文件。'
+      + '如果几个应用只是同一份数据的不同前端，可以点「加入同一个共享根」：各写各的 alias、保留各自身份，不修改远端 group.json。'
       + '下面把两侧身份全部列出；能就地对齐的给按钮（改写前会再确认一次），不能的会写明原因。'));
 
     for (const c of conflicts) {
@@ -1899,6 +1900,16 @@ export class SyncGroupConfiguratorCore {
       row.appendChild(el('div', {}, `本组：${formatIdentity(c.local)}`));
 
       const actions = el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:6px' });
+      if (c.canJoinSharedRoot) {
+        const join = el('button', { className: 'zfui-btn zfui-btn-secondary zfui-btn-sm' },
+          '加入同一个共享根（保留本组身份）');
+        join.title = '在远端 .meta/aliases/ 写一份本组 alias；不改远端 group.json。'
+          + '加入后两个组会共同同步这个远端根里的同一份数据。';
+        on(join, 'click', () => {
+          void this.handleResolveConflict(spec, c, 'join-shared-root');
+        });
+        actions.appendChild(join);
+      }
       if (c.canAdoptRemoteInstance) {
         const adopt = el('button', { className: 'zfui-btn zfui-btn-secondary zfui-btn-sm' },
           '采用远端实例身份（只改本组 instanceId）');
@@ -1915,7 +1926,7 @@ export class SyncGroupConfiguratorCore {
         });
         actions.appendChild(rewrite);
       }
-      if (!c.canAdoptRemoteInstance && !c.canRewriteRemoteIdentity) {
+      if (!c.canJoinSharedRoot && !c.canAdoptRemoteInstance && !c.canRewriteRemoteIdentity) {
         actions.appendChild(el('div', { style: 'color:#7f1d1d' },
           '两侧 kind 或 id 无法相互对齐（或远端身份读不完整），本页不给自动改写：'
           + '请给本组换一个专属的远端根，或到占用该根的那个组里解除绑定。'));
@@ -1947,7 +1958,7 @@ export class SyncGroupConfiguratorCore {
   private async handleResolveConflict(
     spec: GroupCardSpec,
     conflict: BackendConflictInfo,
-    mode: 'adopt-remote-instance' | 'rewrite-remote-identity',
+    mode: 'adopt-remote-instance' | 'rewrite-remote-identity' | 'join-shared-root',
   ): Promise<void> {
     const lines = [
       `后端 ${conflict.backendId} 的远端根与「${spec.kind} 组 ${spec.id}」身份不一致。`,
@@ -1957,8 +1968,11 @@ export class SyncGroupConfiguratorCore {
       '',
       mode === 'adopt-remote-instance'
         ? '将执行：采用远端实例身份 —— 只把本组的 instanceId 改成远端的值，本地库、组 id、kind 保持不变，远端文件不改动。'
-        : '将执行：把远端 `/.meta/group.json` 的 kind / id / instanceId 覆盖成本组的值 —— 这会改写远端根的身份，'
-          + '原本认领它的那个同步组将不再能同步它（对方之后会看到同样的冲突提示）。远端文件内容不改动。',
+        : mode === 'join-shared-root'
+          ? '将执行：把本组作为 alias 加入这个共享根 —— 只写本组自己的 `.meta/aliases/{instanceId}.json`，'
+            + '保留本组和远端各自的 instanceId，不改远端 `group.json`。加入后两个组会共同同步这个远端根里的同一份数据。'
+          : '将执行：把远端 `/.meta/group.json` 的 kind / id / instanceId 覆盖成本组的值 —— 这会改写远端根的身份，'
+            + '原本认领它的那个同步组将不再能同步它（对方之后会看到同样的冲突提示）。远端文件内容不改动。',
       '',
       '执行后本页会刷新并重新连接该后端。确定继续？',
     ];
@@ -1969,7 +1983,9 @@ export class SyncGroupConfiguratorCore {
       window.alert(`身份对齐失败，未做任何改动：\n${result.reason ?? '未知原因'}`);
       return;
     }
-    window.alert('已对齐身份。页面将刷新并重新连接该后端。');
+    window.alert(mode === 'join-shared-root'
+      ? '已写入 alias。页面将刷新并重新连接该后端。'
+      : '已对齐身份。页面将刷新并重新连接该后端。');
     window.location.reload();
   }
 

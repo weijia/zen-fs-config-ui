@@ -206,8 +206,9 @@ export async function createDataGroup(
   repo: IConfigRepo,
   id: string,
   backends: AppDataBackendDescriptor[],
+  options?: { allowSharedRoot?: boolean },
 ): Promise<AppDataGroup> {
-  return repo.createAppDataGroup(id, backends);
+  return repo.createAppDataGroup(id, backends, options);
 }
 
 // ── Group display names (descriptor-only edits) ──────────────────────
